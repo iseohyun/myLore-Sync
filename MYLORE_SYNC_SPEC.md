@@ -27,7 +27,7 @@
 
 ### 2.1 QR 코드 페어링 데이터 포맷 (JSON Schema)
 
-PC `myLore` 앱은 `라이프로그 수집 대쉬보드(F8) > 모바일 기기 QR 페어링` 화면에서 아래의 구조를 가지는 **JSON 데이터**를 Base64 인코딩(또는 Raw JSON)하여 QR 코드로 화면에 렌더링합니다:
+PC `myLore` 앱은 관리자 권한(UAC) 없이도 `netsh wlan show profile name="<SSID>" key=clear` 명령을 통해 현재 연결된 Wi-Fi의 SSID, 비밀번호(`Key Content`), 인증 방식(`WPA2`/`WPA3`)을 즉시 읽어와, `라이프로그 수집 대쉬보드(F8) > 모바일 기기 QR 페어링` 화면에서 아래의 구조를 가지는 **JSON 데이터**(또는 `myloresync://pair?data=<Base64_JSON>` 딥링크 URI)를 QR 코드로 화면에 렌더링합니다:
 
 ```json
 {
@@ -41,6 +41,7 @@ PC `myLore` 앱은 `라이프로그 수집 대쉬보드(F8) > 모바일 기기 Q
   "token": "mylore_sec_a8f9c1d2e3f4567890abcdef12345678",
   "ssid": "iseohyun",
   "wifi_pw": "mypassword1234",
+  "wifi_auth": "WPA2",
   "created_at": 1761650000000
 }
 ```
@@ -53,11 +54,14 @@ PC `myLore` 앱은 `라이프로그 수집 대쉬보드(F8) > 모바일 기기 Q
 | `ips` | Array<String> | PC의 로컬 네트워크 IP 목록 (이중 랜카드/Wi-Fi 대응) |
 | `port` | Integer | PC myLore HTTP 서버 포트 (기본값: `18443`) |
 | `token` | String | 양방향 REST API 인증용 고유 보안 토큰 (`X-MyLore-Token`) |
-| `ssid` | String | PC 서버가 소속된 NAT 공유기 Wi-Fi 네트워크 식별자 (모바일 자동 접속 및 연동용) |
-| `wifi_pw` | String | PC 서버 소속 Wi-Fi 네트워크 비밀번호 |
+| `ssid` | String | PC 서버가 소속된 NAT 공유기 Wi-Fi 네트워크 식별자 (`netsh wlan`으로 자동 추출) |
+| `wifi_pw` | String | PC 서버 소속 Wi-Fi 네트워크 비밀번호 (`netsh wlan ... key=clear`의 `Key Content`) |
+| `wifi_auth` | String | Wi-Fi 인증 방식 (`WPA2`, `WPA3`, `OPEN` 등, 기본값: `"WPA2"`) |
 | `created_at` | Long | QR 코드 생성 타임스탬프 (ms) |
 
-> **Wi-Fi 연동 정책 변경**: 사용자가 앱 설정에서 수동으로 허용 Wi-Fi SSID 목록을 일일이 추가/삭제하던 방식을 **전면 폐지**하고, 서버가 제공한 QR 코드 내 `ssid` 및 `wifi_pw` 정보를 바탕으로 모바일 기기가 서버 소속 NAT 공유기에 원클릭으로 접속하여 연동되도록 간소화했습니다.
+> **Wi-Fi 선(先) 접속 → 핸드셰이크 자동 재시도 파이프라인**:
+> 기존처럼 사설 IP(`192.168.x.x`)로 서버 핸드셰이크를 먼저 시도하고 성공했을 때만 `WifiConnector`를 호출하면, 다른 네트워크(모바일 데이터 LTE/5G 또는 다른 공유기)에서 QR을 찍었을 때 사설 IP 라우팅이 불가능해 Wi-Fi 연결 시도조차 하지 않고 실패합니다.
+> 따라서 **`1) QR 페어링 정보 선(先) 저장 ➔ 2) 서버 소속 Wi-Fi 선(先) 접속(WifiNetworkSuggestion + WifiNetworkSpecifier) 및 네트워크 바인딩 대기 ➔ 3) 다중 후보 IP 순회 핸드셰이크 자동 재시도`** 순서로 동작하여 어떤 네트워크 상태에서든 원스톱 연결을 보장합니다.
 
 ---
 
@@ -65,29 +69,37 @@ PC `myLore` 앱은 `라이프로그 수집 대쉬보드(F8) > 모바일 기기 Q
 
 ```mermaid
 sequenceDiagram
-    participant PC as 💻 PC myLore 데스크톱
+    participant PC as 💻 PC myLore 서버
     participant App as 📱 Mobile myLore Sync
+    participant WiFi as 📡 Android WifiManager / ConnectivityManager
     participant DS as 💾 DataStore (로컬)
 
     Note over PC: 1. PC 대시보드 > [모바일 기기 QR 페어링] 클릭
-    PC->>PC: 보안 토큰 생성 & 서버 소속 NAT Wi-Fi(SSID, PW) 포함 QR 코드(JSON) 표시
+    PC->>PC: netsh wlan show profile name="<SSID>" key=clear 실행 (No-UAC)
+    PC->>PC: 보안 토큰 + 로컬 IP 목록 + Wi-Fi(SSID, PW, WPA2/WPA3) 포함 QR 코드 표시
 
-    Note over App: 2. 모바일 앱 최초 실행 (온보딩)
-    App->>App: [QR 코드로 자동 연결] 버튼 클릭 -> CameraX QR 스캐너 오픈
+    Note over App: 2. 모바일 QR 스캔 (앱 내 스캐너 또는 기본 카메라 딥링크)
     App->>PC: PC 화면의 QR 코드 카메라 스캔
-    App->>App: QR JSON 파싱 (IP, Port, Token, 서버 NAT SSID/PW 추출)
+    App->>App: QR JSON 파싱 (IP 목록, Port, Token, 서버 NAT SSID/PW/Auth 추출)
+    App->>DS: 페어링 설정 및 서버 Wi-Fi 정보 선(先) 저장
 
-    Note over App,PC: 3. 서버 통신 테스트 & 핸드셰이크
-    App->>PC: GET http://192.168.0.15:18443/api/v1/status (Header: X-MyLore-Token)
-    PC-->>App: { ok: true, status: "ok", pc_name: "MYLORE-DESKTOP", last_sms_ts: 0, ... } (200 OK)
+    Note over App,WiFi: 3. Wi-Fi 선(先) 접속 및 라우팅 전환 대기
+    alt 현재 연결된 Wi-Fi != 서버 SSID (모바일 데이터 또는 타 Wi-Fi)
+        App->>WiFi: WifiNetworkSuggestion 등록 + WifiNetworkSpecifier 즉시 연결 요청
+        WiFi-->>App: 서버 소속 Wi-Fi(SSID) 연결 완료 & bindProcessToNetwork 바인딩
+    end
 
-    App->>PC: POST /api/v1/pair/confirm ({ device_name: "Galaxy S24", model: "SM-S921N" })
-    PC-->>App: { ok: true, registered_device_id: "dev_98765" }
+    Note over App,PC: 4. 다중 IP 순회 서버 핸드셰이크 자동 재시도 (최대 8회 폴링)
+    loop 후보 IP 순회 및 재시도 (1.5초 간격)
+        App->>PC: GET http://{ip}:18443/api/v1/status (Header: X-MyLore-Token)
+        PC-->>App: { ok: true, status: "ok", pc_name: "MYLORE-DESKTOP", ... } (200 OK)
+        App->>PC: POST /api/v1/pair/confirm ({ device_name: "Galaxy S24", model: "SM-S921N" })
+        PC-->>App: { ok: true, registered_device_id: "dev_98765" }
+    end
 
-    Note over App: 4. 설정 저장 & 서버 Wi-Fi 연동
-    App->>DS: IP, Port, Token, 서버 Wi-Fi SSID/PW 저장 (is_paired = true)
-    App->>App: 필요 시 서버 소속 Wi-Fi 자동 제안(Suggestion) 및 연결 유도
-    App-->>PC: 대시보드에 "연결 완료" 상태 표시 & PC에 "스마트폰 연결됨" 알림
+    Note over App: 5. 최종 연동 확정 및 실시간 동기화 엔진 가동
+    App->>DS: 성공한 IP 확정 저장 (is_paired = true)
+    App-->>PC: 대시보드에 "연결됨" 표시 & RealtimeSyncForegroundService 즉시 시작
 ```
 
 ---

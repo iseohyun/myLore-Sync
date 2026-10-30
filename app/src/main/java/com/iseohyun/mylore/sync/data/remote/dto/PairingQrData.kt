@@ -14,6 +14,8 @@ data class PairingQrData(
     @SerializedName("wifi_pw") val wifiPw: String? = null,
     @SerializedName("pw") val pw: String? = null,
     @SerializedName("password") val password: String? = null,
+    @SerializedName("wifi_auth") val wifiAuth: String? = null,
+    @SerializedName("auth") val auth: String? = null,
     @SerializedName("ssids") val ssids: List<String> = emptyList(),
     @SerializedName("created_at") val createdAt: Long = 0L
 ) {
@@ -22,6 +24,9 @@ data class PairingQrData(
 
     val targetWifiPw: String
         get() = wifiPw?.ifBlank { null } ?: pw?.ifBlank { null } ?: password ?: ""
+
+    val targetWifiAuth: String
+        get() = wifiAuth?.ifBlank { null } ?: auth?.ifBlank { null } ?: "WPA2"
 
     companion object {
         fun parse(rawString: String): PairingQrData? {

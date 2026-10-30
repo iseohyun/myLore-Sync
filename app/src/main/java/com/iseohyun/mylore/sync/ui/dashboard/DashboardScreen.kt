@@ -31,7 +31,7 @@ import com.iseohyun.mylore.sync.engine.RealtimeSyncForegroundService
 import com.iseohyun.mylore.sync.engine.SyncConditionMonitor
 import com.iseohyun.mylore.sync.ui.businesscard.LiveCardScannerActivity
 import com.iseohyun.mylore.sync.ui.onboarding.QrScannerActivity
-import com.iseohyun.mylore.sync.ui.onboarding.performHandshakeAndSave
+import com.iseohyun.mylore.sync.ui.onboarding.executeQrPairingPipeline
 import com.iseohyun.mylore.sync.ui.screens.*
 import com.iseohyun.mylore.sync.ui.settings.SettingsScreen
 import kotlinx.coroutines.launch
@@ -209,31 +209,26 @@ private fun StatusDashboardContent(
             val qrData = PairingQrData.parse(rawContents)
             if (qrData != null && qrData.token.isNotBlank() && qrData.ips.isNotEmpty()) {
                 scope.launch {
-                    Toast.makeText(context, "새 서버와 연결 확인 중...", Toast.LENGTH_SHORT).show()
-                    val ip = qrData.ips.first()
-                    val port = qrData.port
-                    val token = qrData.token
-                    val targetSsid = qrData.targetSsid
-                    val targetWifiPw = qrData.targetWifiPw
+                    Toast.makeText(
+                        context,
+                        "서버 Wi-Fi [${qrData.targetSsid.ifBlank { qrData.pcName }}] 선(先) 접속 및 연동 시도 중...",
+                        Toast.LENGTH_SHORT
+                    ).show()
 
-                    val success = performHandshakeAndSave(
+                    val success = executeQrPairingPipeline(
+                        context = context,
                         appPreferences = appPreferences,
-                        ip = ip,
-                        port = port,
-                        token = token,
-                        pcName = qrData.pcName,
-                        serverSsid = targetSsid,
-                        serverWifiPw = targetWifiPw
+                        qrData = qrData
                     )
                     if (success) {
                         Toast.makeText(context, "myLore 서버 [${qrData.pcName}]와 재연결되었습니다!", Toast.LENGTH_SHORT).show()
-                        if (targetSsid.isNotBlank()) {
-                            com.iseohyun.mylore.sync.engine.WifiConnector.connectOrSuggestWifi(context, targetSsid, targetWifiPw)
-                        }
-                        val (reachable, _, _) = monitor.pingPcServer(ip, port, token)
-                        isPcReachable = reachable
+                        isPcReachable = true
                     } else {
-                        Toast.makeText(context, "myLore 서버 연결에 실패했습니다. PC가 실행 중인지 확인하세요.", Toast.LENGTH_LONG).show()
+                        Toast.makeText(
+                            context,
+                            "QR 정보 저장 완료. [${qrData.targetSsid.ifBlank { "서버 Wi-Fi" }}] 연결 시 자동 연동됩니다.",
+                            Toast.LENGTH_LONG
+                        ).show()
                     }
                 }
             } else {
