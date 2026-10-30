@@ -215,7 +215,7 @@ private fun ManualPairingDialog(
     )
 }
 
-private suspend fun performHandshakeAndSave(
+internal suspend fun performHandshakeAndSave(
     appPreferences: AppPreferences,
     ip: String,
     port: Int,
