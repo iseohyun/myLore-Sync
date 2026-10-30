@@ -3,7 +3,6 @@ package com.iseohyun.mylore.sync.collector
 import android.os.Environment
 import android.util.Log
 import com.iseohyun.mylore.sync.data.prefs.AppPreferences
-import kotlinx.coroutines.flow.first
 import java.io.File
 import java.security.MessageDigest
 import java.util.Locale
@@ -45,6 +44,23 @@ class KakaoChatFolderWatcher {
                 "$bytes B"
             } else {
                 String.format(Locale.US, "%.1f %s", value, units[digitGroups])
+            }
+        }
+
+        fun calculateFileHash(file: File): String? {
+            return try {
+                val digest = MessageDigest.getInstance("SHA-256")
+                file.inputStream().use { inputStream ->
+                    val buffer = ByteArray(8192)
+                    var bytesRead: Int
+                    while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                        digest.update(buffer, 0, bytesRead)
+                    }
+                }
+                digest.digest().joinToString("") { "%02x".format(it) }
+            } catch (e: Exception) {
+                Log.e("KakaoChatWatcher", "Error hashing file: ${file.name}", e)
+                null
             }
         }
     }
@@ -93,14 +109,13 @@ class KakaoChatFolderWatcher {
     }
 
     /**
-     * UI 표시용: 모든 대화방(현재 및 과거 폴더)의 요약 정보, 공유 대상 용량 및 진행률(%)을 반환합니다.
+     * UI 표시용: 모든 대화방의 요약 정보, 공유 대상 용량 및 실제 전송된 진행률(%)을 반환합니다.
      */
     suspend fun scanRoomSummaries(prefs: AppPreferences? = null): List<KakaoRoomSummary> {
         val summaries = mutableListOf<KakaoRoomSummary>()
         if (!targetFolder.exists() || !targetFolder.isDirectory) return summaries
 
         val subFolders = targetFolder.listFiles { f -> f.isDirectory } ?: return summaries
-        val lastKakaoTs = prefs?.lastKakaoTs?.first() ?: 0L
 
         for (folder in subFolders) {
             val allFiles = folder.listFiles { f -> f.isFile } ?: emptyArray()
@@ -128,16 +143,10 @@ class KakaoChatFolderWatcher {
                 lastSharedTime = syncState.lastSharedTs
             }
 
-            // 만약 개별 방 공유 시점이 없으나 전역 lastKakaoTs가 대화 수정시간 이상이면 100% 동기화된 것으로 간주
-            if (lastSharedTime == 0L && lastKakaoTs >= txtFile.lastModified() && lastKakaoTs > 0L) {
-                lastSharedTime = lastKakaoTs
-                syncedBytes = totalBytes
-            }
-
+            // 실제 서버 전송된 바이트를 기준으로만 % 계산 (가짜 100% 추정 로직 완전 제거)
             val percent = when {
                 totalBytes <= 0L -> 100
                 syncedBytes >= totalBytes -> 100
-                lastSharedTime >= txtFile.lastModified() && lastSharedTime > 0L -> 100
                 syncedBytes > 0L -> ((syncedBytes.toDouble() / totalBytes) * 100).toInt().coerceIn(0, 100)
                 else -> 0
             }
@@ -202,23 +211,6 @@ class KakaoChatFolderWatcher {
             }
         } catch (_: Exception) {
             fallback
-        }
-    }
-
-    private fun calculateFileHash(file: File): String? {
-        return try {
-            val digest = MessageDigest.getInstance("SHA-256")
-            file.inputStream().use { inputStream ->
-                val buffer = ByteArray(8192)
-                var bytesRead: Int
-                while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                    digest.update(buffer, 0, bytesRead)
-                }
-            }
-            digest.digest().joinToString("") { "%02x".format(it) }
-        } catch (e: Exception) {
-            Log.e("KakaoChatWatcher", "Error hashing file: ${file.name}", e)
-            null
         }
     }
 }

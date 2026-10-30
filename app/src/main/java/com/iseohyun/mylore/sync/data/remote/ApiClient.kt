@@ -8,12 +8,12 @@ import java.util.concurrent.TimeUnit
 
 object ApiClient {
 
-    private fun createOkHttpClient(timeoutSec: Long = 10L): OkHttpClient {
+    private fun createOkHttpClient(timeoutSec: Long = 180L): OkHttpClient {
         val loggingInterceptor = HttpLoggingInterceptor().apply {
-            level = HttpLoggingInterceptor.Level.BODY
+            level = HttpLoggingInterceptor.Level.HEADERS
         }
         return OkHttpClient.Builder()
-            .connectTimeout(1500, TimeUnit.MILLISECONDS) // Health-check & connection timeout 1.5s
+            .connectTimeout(5000, TimeUnit.MILLISECONDS)
             .readTimeout(timeoutSec, TimeUnit.SECONDS)
             .writeTimeout(timeoutSec, TimeUnit.SECONDS)
             .addInterceptor(loggingInterceptor)
