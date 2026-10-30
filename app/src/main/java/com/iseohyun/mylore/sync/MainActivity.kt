@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -15,11 +16,15 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.lifecycle.lifecycleScope
 import com.iseohyun.mylore.sync.data.prefs.AppPreferences
+import com.iseohyun.mylore.sync.data.remote.dto.PairingQrData
 import com.iseohyun.mylore.sync.ui.dashboard.DashboardScreen
 import com.iseohyun.mylore.sync.ui.onboarding.OnboardingScreen
+import com.iseohyun.mylore.sync.ui.onboarding.executeQrPairingPipeline
 import com.iseohyun.mylore.sync.ui.settings.SettingsScreen
 import com.iseohyun.mylore.sync.ui.theme.MyLoreSyncTheme
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
@@ -36,6 +41,7 @@ class MainActivity : ComponentActivity() {
         appPreferences = AppPreferences(applicationContext)
 
         requestRequiredPermissions()
+        handleDeepLinkIntent(intent)
 
         setContent {
             MyLoreSyncTheme {
@@ -69,6 +75,48 @@ class MainActivity : ComponentActivity() {
                                 )
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleDeepLinkIntent(intent)
+    }
+
+    private fun handleDeepLinkIntent(intent: Intent?) {
+        val dataUri = intent?.data ?: return
+        if (dataUri.scheme == "myloresync" && dataUri.host == "pair") {
+            val rawData = dataUri.getQueryParameter("data") ?: dataUri.toString()
+            val qrData = PairingQrData.parse(rawData)
+            if (qrData != null && qrData.token.isNotBlank() && qrData.ips.isNotEmpty()) {
+                lifecycleScope.launch {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "서버 Wi-Fi [${qrData.targetSsid.ifBlank { qrData.pcName }}] 선(先) 접속 및 연동 시도 중...",
+                        Toast.LENGTH_SHORT
+                    ).show()
+
+                    val success = executeQrPairingPipeline(
+                        context = this@MainActivity,
+                        appPreferences = appPreferences,
+                        qrData = qrData
+                    )
+                    if (success) {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "myLore 서버 [${qrData.pcName}]와 원스톱 연결되었습니다!",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    } else {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "QR 정보 저장 완료. [${qrData.targetSsid.ifBlank { "서버 Wi-Fi" }}] 연결 시 자동 연동됩니다.",
+                            Toast.LENGTH_LONG
+                        ).show()
                     }
                 }
             }

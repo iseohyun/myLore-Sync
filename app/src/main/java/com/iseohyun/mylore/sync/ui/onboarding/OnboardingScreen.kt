@@ -1,5 +1,6 @@
 package com.iseohyun.mylore.sync.ui.onboarding
 
+import android.content.Context
 import android.os.Build
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -18,9 +19,11 @@ import com.iseohyun.mylore.sync.data.prefs.AppPreferences
 import com.iseohyun.mylore.sync.data.remote.ApiClient
 import com.iseohyun.mylore.sync.data.remote.dto.PairConfirmRequest
 import com.iseohyun.mylore.sync.data.remote.dto.PairingQrData
+import com.iseohyun.mylore.sync.engine.WifiConnector
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -34,6 +37,7 @@ fun OnboardingScreen(
 
     var showManualDialog by remember { mutableStateOf(false) }
     var isLoading by remember { mutableStateOf(false) }
+    var loadingMessage by remember { mutableStateOf("서버와 통신 확인 중...") }
 
     val qrLauncher = rememberLauncherForActivityResult(contract = ScanContract()) { result ->
         val rawContents = result.contents
@@ -42,31 +46,23 @@ fun OnboardingScreen(
             if (qrData != null && qrData.token.isNotBlank() && qrData.ips.isNotEmpty()) {
                 isLoading = true
                 scope.launch {
-                    val ip = qrData.ips.first()
-                    val port = qrData.port
-                    val token = qrData.token
-
-                    val serverSsid = qrData.targetSsid
-                    val serverWifiPw = qrData.targetWifiPw
-
-                    val success = performHandshakeAndSave(
+                    val success = executeQrPairingPipeline(
+                        context = context,
                         appPreferences = appPreferences,
-                        ip = ip,
-                        port = port,
-                        token = token,
-                        pcName = qrData.pcName,
-                        serverSsid = serverSsid,
-                        serverWifiPw = serverWifiPw
+                        qrData = qrData,
+                        onStatusUpdate = { msg -> loadingMessage = msg }
                     )
                     isLoading = false
                     if (success) {
-                        Toast.makeText(context, "myLore [${qrData.pcName}]와 연결되었습니다!", Toast.LENGTH_SHORT).show()
-                        if (serverSsid.isNotBlank()) {
-                            com.iseohyun.mylore.sync.engine.WifiConnector.connectOrSuggestWifi(context, serverSsid, serverWifiPw)
-                        }
+                        Toast.makeText(context, "myLore 서버 [${qrData.pcName}]와 연결되었습니다!", Toast.LENGTH_SHORT).show()
                         onPairingSuccess()
                     } else {
-                        Toast.makeText(context, "PC 서버 연결에 실패했습니다. PC가 실행 중인지 확인하세요.", Toast.LENGTH_LONG).show()
+                        Toast.makeText(
+                            context,
+                            "QR 정보는 저장되었습니다. [${qrData.targetSsid.ifBlank { "서버 Wi-Fi" }}] 연결 시 자동 동기화됩니다.",
+                            Toast.LENGTH_LONG
+                        ).show()
+                        onPairingSuccess()
                     }
                 }
             } else {
@@ -103,7 +99,7 @@ fun OnboardingScreen(
         if (isLoading) {
             CircularProgressIndicator()
             Spacer(modifier = Modifier.height(16.dp))
-            Text("PC와 통신 확인 중...")
+            Text(loadingMessage, fontWeight = FontWeight.Medium)
         } else {
             Button(
                 onClick = {
@@ -143,6 +139,7 @@ fun OnboardingScreen(
             onConfirm = { ip, port, token ->
                 showManualDialog = false
                 isLoading = true
+                loadingMessage = "수동 IP [$ip:$port] 연결 확인 중..."
                 scope.launch {
                     val success = performHandshakeAndSave(
                         appPreferences = appPreferences,
@@ -152,10 +149,10 @@ fun OnboardingScreen(
                     )
                     isLoading = false
                     if (success) {
-                        Toast.makeText(context, "PC와 수동 연결되었습니다!", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "myLore 서버와 수동 연결되었습니다!", Toast.LENGTH_SHORT).show()
                         onPairingSuccess()
                     } else {
-                        Toast.makeText(context, "입력하신 IP/포트로 PC 접속에 실패했습니다.", Toast.LENGTH_LONG).show()
+                        Toast.makeText(context, "입력하신 IP/포트로 서버 접속에 실패했습니다.", Toast.LENGTH_LONG).show()
                     }
                 }
             }
@@ -220,6 +217,75 @@ private fun ManualPairingDialog(
             }
         }
     )
+}
+
+/**
+ * [Wi-Fi 선(先) 접속 → 핸드셰이크 자동 재시도] 원스톱 QR 페어링 파이프라인
+ * 1. QR 코드 정보를 로컬 DataStore에 즉시 선저장 (네트워크가 달라도 설정 유실 방지)
+ * 2. 현재 Wi-Fi가 서버 소속 SSID가 아닌 경우, WifiConnector를 먼저 호출하여 Wi-Fi 연결 수행 및 대기
+ * 3. QR의 모든 후보 IP(ips)를 순회하며 최대 15초간 핸드셰이크 자동 재시도
+ */
+internal suspend fun executeQrPairingPipeline(
+    context: Context,
+    appPreferences: AppPreferences,
+    qrData: PairingQrData,
+    onStatusUpdate: (String) -> Unit = {}
+): Boolean {
+    val serverSsid = qrData.targetSsid
+    val serverWifiPw = qrData.targetWifiPw
+    val serverWifiAuth = qrData.targetWifiAuth
+    val candidateIps = qrData.ips.filter { it.isNotBlank() }
+    val port = qrData.port
+    val token = qrData.token
+
+    if (candidateIps.isEmpty() || token.isBlank()) return false
+
+    // Step 1: QR에서 획득한 페어링 정보 및 Wi-Fi 자격 증명을 먼저 저장
+    appPreferences.savePairingInfo(
+        ip = candidateIps.first(),
+        port = port,
+        token = token,
+        pcName = qrData.pcName,
+        serverSsid = serverSsid,
+        serverWifiPw = serverWifiPw
+    )
+
+    // Step 2: Wi-Fi 선(先) 접속 (다른 Wi-Fi 또는 모바일 데이터 상태일 때 먼저 서버 NAT Wi-Fi로 전환)
+    if (serverSsid.isNotBlank() && !WifiConnector.isConnectedToTargetSsid(context, serverSsid)) {
+        onStatusUpdate("서버 소속 Wi-Fi [$serverSsid] 선(先) 접속 중...")
+        WifiConnector.ensureWifiConnectedBeforeHandshake(
+            context = context,
+            targetSsid = serverSsid,
+            password = serverWifiPw,
+            authType = serverWifiAuth,
+            maxWaitMs = 12000L
+        )
+    }
+
+    // Step 3: 핸드셰이크 자동 재시도 (Wi-Fi 전환 직후 DHCP/라우팅 지연 및 다중 IP 대응)
+    val maxAttempts = 8
+    for (attempt in 1..maxAttempts) {
+        onStatusUpdate("myLore 서버 [${qrData.pcName}] 핸드셰이크 연결 시도 중 ($attempt/$maxAttempts)...")
+        for (ip in candidateIps) {
+            val ok = performHandshakeAndSave(
+                appPreferences = appPreferences,
+                ip = ip,
+                port = port,
+                token = token,
+                pcName = qrData.pcName,
+                serverSsid = serverSsid,
+                serverWifiPw = serverWifiPw
+            )
+            if (ok) {
+                return true
+            }
+        }
+        if (attempt < maxAttempts) {
+            delay(1500)
+        }
+    }
+
+    return false
 }
 
 internal suspend fun performHandshakeAndSave(
