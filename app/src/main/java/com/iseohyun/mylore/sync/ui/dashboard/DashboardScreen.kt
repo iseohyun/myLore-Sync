@@ -4,7 +4,9 @@ import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -18,13 +20,18 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import com.iseohyun.mylore.sync.collector.AppUsageCollector
 import com.iseohyun.mylore.sync.data.local.AppDatabase
 import com.iseohyun.mylore.sync.data.local.entity.SyncLogEntity
 import com.iseohyun.mylore.sync.data.prefs.AppPreferences
+import com.iseohyun.mylore.sync.data.remote.dto.PairingQrData
 import com.iseohyun.mylore.sync.engine.RealtimeSyncForegroundService
 import com.iseohyun.mylore.sync.engine.SyncConditionMonitor
 import com.iseohyun.mylore.sync.ui.businesscard.LiveCardScannerActivity
+import com.iseohyun.mylore.sync.ui.onboarding.QrScannerActivity
+import com.iseohyun.mylore.sync.ui.onboarding.performHandshakeAndSave
 import com.iseohyun.mylore.sync.ui.screens.*
 import com.iseohyun.mylore.sync.ui.settings.SettingsScreen
 import kotlinx.coroutines.launch
@@ -192,6 +199,40 @@ private fun StatusDashboardContent(
 
     val logs by db.syncLogDao().getRecentLogsFlow().collectAsState(initial = emptyList())
     val monitor = remember { SyncConditionMonitor(context) }
+    val scope = rememberCoroutineScope()
+
+    val qrLauncher = rememberLauncherForActivityResult(contract = ScanContract()) { result ->
+        val rawContents = result.contents
+        if (!rawContents.isNullOrBlank()) {
+            val qrData = PairingQrData.parse(rawContents)
+            if (qrData != null && qrData.token.isNotBlank() && qrData.ips.isNotEmpty()) {
+                scope.launch {
+                    Toast.makeText(context, "새 서버와 연결 확인 중...", Toast.LENGTH_SHORT).show()
+                    val ip = qrData.ips.first()
+                    val port = qrData.port
+                    val token = qrData.token
+
+                    val success = performHandshakeAndSave(
+                        appPreferences = appPreferences,
+                        ip = ip,
+                        port = port,
+                        token = token,
+                        pcName = qrData.pcName,
+                        ssids = qrData.ssids.toSet()
+                    )
+                    if (success) {
+                        Toast.makeText(context, "myLore 서버 [${qrData.pcName}]와 재연결되었습니다!", Toast.LENGTH_SHORT).show()
+                        val (reachable, _, _) = monitor.pingPcServer(ip, port, token)
+                        isPcReachable = reachable
+                    } else {
+                        Toast.makeText(context, "myLore 서버 연결에 실패했습니다. PC가 실행 중인지 확인하세요.", Toast.LENGTH_LONG).show()
+                    }
+                }
+            } else {
+                Toast.makeText(context, "유효하지 않은 QR 코드입니다.", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
 
     LaunchedEffect(pcIp, pcPort, pairingToken) {
         while (true) {
@@ -304,9 +345,22 @@ private fun StatusDashboardContent(
                 Spacer(modifier = Modifier.height(8.dp))
 
                 StatusRow(
-                    label = "3. PC myLore 서버",
-                    value = if (isPcReachable) "온라인 (Online)" else "오프라인 (Unreachable)",
-                    isOk = isPcReachable
+                    label = "3. myLore 서버",
+                    value = if (isPcReachable) "온라인 (Online)" else "오프라인 (클릭하여 QR 재연결)",
+                    isOk = isPcReachable,
+                    onClick = if (!isPcReachable) {
+                        {
+                            val options = ScanOptions().apply {
+                                setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                                setPrompt("PC 화면의 myLore QR 코드를 스캔하세요")
+                                setCameraId(0)
+                                setBeepEnabled(true)
+                                setBarcodeImageEnabled(false)
+                                setCaptureActivity(QrScannerActivity::class.java)
+                            }
+                            qrLauncher.launch(options)
+                        }
+                    } else null
                 )
             }
         }
@@ -372,9 +426,25 @@ private fun StatusDashboardContent(
 }
 
 @Composable
-private fun StatusRow(label: String, value: String, isOk: Boolean) {
+private fun StatusRow(
+    label: String,
+    value: String,
+    isOk: Boolean,
+    onClick: (() -> Unit)? = null
+) {
+    val clickableModifier = if (onClick != null) {
+        Modifier
+            .fillMaxWidth()
+            .clickable { onClick() }
+            .padding(vertical = 4.dp)
+    } else {
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+    }
+
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = clickableModifier,
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -386,7 +456,12 @@ private fun StatusRow(label: String, value: String, isOk: Boolean) {
                     .background(if (isOk) Color(0xFF4CAF50) else Color(0xFFF44336), CircleShape)
             )
             Spacer(modifier = Modifier.width(6.dp))
-            Text(value, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+            Text(
+                value,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+                color = if (!isOk && onClick != null) MaterialTheme.colorScheme.primary else Color.Unspecified
+            )
         }
     }
 }
