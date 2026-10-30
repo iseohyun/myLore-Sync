@@ -82,9 +82,27 @@ object WifiConnector {
                 val status = wifiManager.addNetworkSuggestions(suggestions)
                 Log.d("WifiConnector", "addNetworkSuggestions($ssid) result=$status")
 
-                // 2. 현재 해당 SSID에 미연결 상태인 경우 WifiNetworkSpecifier로 OS 즉시 연결 다이얼로그 요청
+                // 2. 현재 해당 SSID에 미연결 상태인 경우:
+                //    - Android 11+ (R, API 30+): 방식 A (Settings.ACTION_WIFI_ADD_NETWORKS)로 OS 정식 저장 모달 호출
+                //    - 하위 버전 또는 폴백 시 WifiNetworkSpecifier로 즉시 연결 요청
                 if (!isConnectedToTargetSsid(context, ssid)) {
-                    requestImmediateWifiConnection(context, ssid, password, isWpa3)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        try {
+                            val addNetworksIntent = Intent(Settings.ACTION_WIFI_ADD_NETWORKS).apply {
+                                putParcelableArrayListExtra(
+                                    Settings.EXTRA_WIFI_NETWORK_LIST,
+                                    ArrayList(listOf(suggestions.first()))
+                                )
+                                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                            }
+                            context.startActivity(addNetworksIntent)
+                        } catch (e: Exception) {
+                            Log.w("WifiConnector", "ACTION_WIFI_ADD_NETWORKS failed, falling back to Specifier", e)
+                            requestImmediateWifiConnection(context, ssid, password, isWpa3)
+                        }
+                    } else {
+                        requestImmediateWifiConnection(context, ssid, password, isWpa3)
+                    }
                 }
             }
 

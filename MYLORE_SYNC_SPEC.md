@@ -27,7 +27,7 @@
 
 ### 2.1 QR 코드 페어링 데이터 포맷 (JSON Schema)
 
-PC `myLore` 앱은 관리자 권한(UAC) 없이도 `netsh wlan show profile name="<SSID>" key=clear` 명령을 통해 현재 연결된 Wi-Fi의 SSID, 비밀번호(`Key Content`), 인증 방식(`WPA2`/`WPA3`)을 즉시 읽어와, `라이프로그 수집 대쉬보드(F8) > 모바일 기기 QR 페어링` 화면에서 아래의 구조를 가지는 **JSON 데이터**(또는 `myloresync://pair?data=<Base64_JSON>` 딥링크 URI)를 QR 코드로 화면에 렌더링합니다:
+PC `myLore` 앱은 **별도의 체크박스 없이 항상** 관리자 권한(UAC) 불필요 명령인 `netsh wlan show interfaces`(현재 연결된 SSID 탐지) 및 `netsh wlan show profile name="<SSID>" key=clear` 명령을 통해 현재 연결된 Wi-Fi의 SSID, 비밀번호(`Key Content`), 인증 방식(`WPA2`/`WPA3`/`OPEN` — WPA2/WPA3 혼합 공유기는 최대 호환성을 위해 `"WPA2"` 우선)을 즉시 읽어와, `라이프로그 수집 대쉬보드(F8) > 모바일 기기 QR 페어링` 화면에서 아래의 구조를 가지는 **JSON 데이터**(또는 `myloresync://pair?data=<Base64_JSON>` 딥링크 URI)를 QR 코드로 화면에 렌더링합니다:
 
 ```json
 {
@@ -39,9 +39,12 @@ PC `myLore` 앱은 관리자 권한(UAC) 없이도 `netsh wlan show profile name
   ],
   "port": 18443,
   "token": "mylore_sec_a8f9c1d2e3f4567890abcdef12345678",
-  "ssid": "iseohyun",
+  "ssid": "seohyun5G",
   "wifi_pw": "mypassword1234",
   "wifi_auth": "WPA2",
+  "ssids": [
+    "seohyun5G"
+  ],
   "created_at": 1761650000000
 }
 ```
@@ -54,14 +57,24 @@ PC `myLore` 앱은 관리자 권한(UAC) 없이도 `netsh wlan show profile name
 | `ips` | Array<String> | PC의 로컬 네트워크 IP 목록 (이중 랜카드/Wi-Fi 대응) |
 | `port` | Integer | PC myLore HTTP 서버 포트 (기본값: `18443`) |
 | `token` | String | 양방향 REST API 인증용 고유 보안 토큰 (`X-MyLore-Token`) |
-| `ssid` | String | PC 서버가 소속된 NAT 공유기 Wi-Fi 네트워크 식별자 (`netsh wlan`으로 자동 추출) |
-| `wifi_pw` | String | PC 서버 소속 Wi-Fi 네트워크 비밀번호 (`netsh wlan ... key=clear`의 `Key Content`) |
-| `wifi_auth` | String | Wi-Fi 인증 방식 (`WPA2`, `WPA3`, `OPEN` 등, 기본값: `"WPA2"`) |
+| `ssid` | String | PC 서버가 현재 연결된 NAT 공유기 Wi-Fi 네트워크 식별자 (`netsh wlan show interfaces`로 자동 추출) |
+| `wifi_pw` | String | PC 서버 소속 Wi-Fi 네트워크 비밀번호 (`netsh wlan show profile ... key=clear`의 `Key Content` 자동 추출) |
+| `wifi_auth` | String | Wi-Fi 인증 방식 (`WPA2`, `WPA3`, `OPEN`, 기본값: `"WPA2"`. WPA2/WPA3 혼합 공유기는 `"WPA2"`로 정규화) |
+| `ssids` | Array<String> | 하위 호환용 허용 SSID 배열 (`ssid`가 0번 인덱스에 위치) |
 | `created_at` | Long | QR 코드 생성 타임스탬프 (ms) |
 
-> **Wi-Fi 선(先) 접속 → 핸드셰이크 자동 재시도 파이프라인**:
-> 기존처럼 사설 IP(`192.168.x.x`)로 서버 핸드셰이크를 먼저 시도하고 성공했을 때만 `WifiConnector`를 호출하면, 다른 네트워크(모바일 데이터 LTE/5G 또는 다른 공유기)에서 QR을 찍었을 때 사설 IP 라우팅이 불가능해 Wi-Fi 연결 시도조차 하지 않고 실패합니다.
-> 따라서 **`1) QR 페어링 정보 선(先) 저장 ➔ 2) 서버 소속 Wi-Fi 선(先) 접속(WifiNetworkSuggestion + WifiNetworkSpecifier) 및 네트워크 바인딩 대기 ➔ 3) 다중 후보 IP 순회 핸드셰이크 자동 재시도`** 순서로 동작하여 어떤 네트워크 상태에서든 원스톱 연결을 보장합니다.
+> **[핵심] 방식 A (`Settings.ACTION_WIFI_ADD_NETWORKS`) + 폴링 재시도 결합 파이프라인**:
+> 기존처럼 사설 IP(`192.168.x.x`)로 서버 핸드셰이크를 먼저 시도하고 성공했을 때만 `WifiConnector`를 호출하면, 다른 네트워크(모바일 데이터 LTE/5G 또는 다른 공유기)에서 QR을 찍었을 때 사설 IP 라우팅이 불가능해 Wi-Fi 연결 시도조차 하지 않고 실패합니다. 또한 단순 `WifiNetworkSpecifier`만 사용하면 앱 종료 시 Wi-Fi 연결이 해제될 수 있습니다.
+> 따라서 `myLore Sync` 앱은 아래 **4단계 원스톱 파이프라인 (`방식 A + 폴링 재시도 결합`)**으로 동작하여 어떤 네트워크 상태에서든 원스톱 연결과 영구 Wi-Fi 등록을 보장합니다:
+> 1. **Step 1 — QR 페어링 정보 선(先) 저장 (`AppPreferences.savePairingInfo`)**: 서버 핸드셰이크 성공 여부와 무관하게, QR 스캔 즉시 `ips.first()`, `port`, `token`, `pc_name`, `ssid`, `wifi_pw`를 로컬 `DataStore`에 먼저 저장합니다.
+> 2. **Step 2 — 빠른 1차 핑 체크 (이미 동일 공유기에 연결된 경우 즉시 통과)**: 이미 휴대폰이 서버와 같은 공유기에 연결되어 있는 경우(2.4GHz/5GHz 대역 또는 위치 권한 미허용 `<unknown ssid>` 상태 포함)를 위해 후보 `ips`로 1회 빠른 핸드셰이크를 먼저 시도합니다. 성공하면 Wi-Fi 추가 팝업을 띄우지 않고 1초 만에 페어링을 완료합니다.
+> 3. **Step 3 — 방식 A (`Settings.ACTION_WIFI_ADD_NETWORKS` 인텐트)로 OS 정식 Wi-Fi 영구 등록**:
+>    - 1차 핑이 실패하고 `ssid`가 비어 있지 않으며 현재 연결된 SSID와 다를 경우:
+>    - **Android 11 (API 30, `Build.VERSION_CODES.R`) 이상**: `Intent(Settings.ACTION_WIFI_ADD_NETWORKS)`에 `Settings.EXTRA_WIFI_NETWORK_LIST`(`ArrayList<WifiNetworkSuggestion>`)를 담아 시스템 모달(**"`<SSID>` 네트워크를 저장하시겠습니까? [취소 / 저장]"**)을 호출합니다 (백그라운드 `addNetworkSuggestions` 병행). 사용자가 **[저장] 1회만 탭**하면 비밀번호 입력 없이 **OS 정식 저장 네트워크로 영구 등록 및 즉시 자동 연결**됩니다.
+>    - **Android 10 (API 29) 이하 폴백**: `WifiManager.addNetworkSuggestions()` + `WifiNetworkSpecifier`(`ConnectivityManager.requestNetwork`) 및 클립보드 비밀번호 복사로 연결을 유도합니다.
+> 4. **Step 4 — 다중 후보 IP 순회 & 핸드셰이크 자동 폴링 재시도 (최대 10회, 1.5초 간격)**:
+>    - 사용자가 시스템 `[저장]` 버튼을 눌러 공유기에 접속하고 DHCP IP 할당 및 라우팅 테이블이 갱신될 때까지 약 2~6초가 소요됩니다.
+>    - 코루틴 폴링 루프가 1.5초 간격으로 최대 10회(약 15초) 동안 `ConnectivityManager` Wi-Fi 상태와 모든 후보 `ips`에 대해 `performHandshakeAndSave()`를 자동 재시도하며, 연결되는 즉시 페어링 확정 및 `RealtimeSyncForegroundService`를 시작합니다.
 
 ---
 
@@ -71,30 +84,32 @@ PC `myLore` 앱은 관리자 권한(UAC) 없이도 `netsh wlan show profile name
 sequenceDiagram
     participant PC as 💻 PC myLore 서버
     participant App as 📱 Mobile myLore Sync
-    participant WiFi as 📡 Android WifiManager / ConnectivityManager
+    participant OS as 📡 Android OS (ACTION_WIFI_ADD_NETWORKS)
     participant DS as 💾 DataStore (로컬)
 
-    Note over PC: 1. PC 대시보드 > [모바일 기기 QR 페어링] 클릭
-    PC->>PC: netsh wlan show profile name="<SSID>" key=clear 실행 (No-UAC)
-    PC->>PC: 보안 토큰 + 로컬 IP 목록 + Wi-Fi(SSID, PW, WPA2/WPA3) 포함 QR 코드 표시
+    Note over PC: 1. PC 대시보드 > [모바일 기기 QR 페어링] 화면 진입
+    PC->>PC: netsh wlan show interfaces (현재 SSID 탐지)
+    PC->>PC: netsh wlan show profile name="<SSID>" key=clear (No-UAC, PW/Auth 추출)
+    PC->>PC: 별도 체크박스 없이 토큰 + 로컬 IP 목록 + Wi-Fi(SSID, PW, Auth) 포함 QR 코드 표시
 
     Note over App: 2. 모바일 QR 스캔 (앱 내 스캐너 또는 기본 카메라 딥링크)
     App->>PC: PC 화면의 QR 코드 카메라 스캔
-    App->>App: QR JSON 파싱 (IP 목록, Port, Token, 서버 NAT SSID/PW/Auth 추출)
-    App->>DS: 페어링 설정 및 서버 Wi-Fi 정보 선(先) 저장
+    App->>App: QR JSON 파싱 (ips, port, token, ssid, wifi_pw, wifi_auth 추출)
+    App->>DS: Step 1: 페어링 설정 및 서버 Wi-Fi 정보 선(先) 저장
 
-    Note over App,WiFi: 3. Wi-Fi 선(先) 접속 및 라우팅 전환 대기
-    alt 현재 연결된 Wi-Fi != 서버 SSID (모바일 데이터 또는 타 Wi-Fi)
-        App->>WiFi: WifiNetworkSuggestion 등록 + WifiNetworkSpecifier 즉시 연결 요청
-        WiFi-->>App: 서버 소속 Wi-Fi(SSID) 연결 완료 & bindProcessToNetwork 바인딩
-    end
-
-    Note over App,PC: 4. 다중 IP 순회 서버 핸드셰이크 자동 재시도 (최대 8회 폴링)
-    loop 후보 IP 순회 및 재시도 (1.5초 간격)
-        App->>PC: GET http://{ip}:18443/api/v1/status (Header: X-MyLore-Token)
-        PC-->>App: { ok: true, status: "ok", pc_name: "MYLORE-DESKTOP", ... } (200 OK)
-        App->>PC: POST /api/v1/pair/confirm ({ device_name: "Galaxy S24", model: "SM-S921N" })
-        PC-->>App: { ok: true, registered_device_id: "dev_98765" }
+    Note over App,OS: 3. 1차 빠른 핑 체크 후 미연결 시 방식 A (OS Wi-Fi 영구 등록) 호출
+    alt 이미 동일 네트워크여서 1차 핸드셰이크 성공
+        App->>PC: Step 2: GET /api/v1/status & POST /api/v1/pair/confirm (즉시 완료)
+    else 모바일 데이터(LTE/5G) 또는 타 Wi-Fi 상태
+        App->>OS: Step 3: Intent(Settings.ACTION_WIFI_ADD_NETWORKS)<br/>EXTRA_WIFI_NETWORK_LIST = [WifiNetworkSuggestion(ssid, wifi_pw)]
+        OS-->>App: 사용자가 시스템 팝업 [저장] 1회 탭 ➔ OS 정식 Wi-Fi 영구 등록 & 자동 접속
+        Note over App,PC: Step 4: 다중 후보 IP 순회 핸드셰이크 폴링 재시도 (1.5초 간격 × 최대 10회)
+        loop 후보 IP 순회 및 재시도 (DHCP/라우팅 완료 대기)
+            App->>PC: GET http://{ip}:18443/api/v1/status (Header: X-MyLore-Token)
+            PC-->>App: { ok: true, status: "ok", pc_name: "MYLORE-DESKTOP", ... } (200 OK)
+            App->>PC: POST /api/v1/pair/confirm ({ device_name: "Galaxy S24", model: "SM-S921N" })
+            PC-->>App: { ok: true, registered_device_id: "dev_98765" }
+        end
     end
 
     Note over App: 5. 최종 연동 확정 및 실시간 동기화 엔진 가동

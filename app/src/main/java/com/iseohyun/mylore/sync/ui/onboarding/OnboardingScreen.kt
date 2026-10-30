@@ -250,9 +250,25 @@ internal suspend fun executeQrPairingPipeline(
         serverWifiPw = serverWifiPw
     )
 
-    // Step 2: Wi-Fi 선(先) 접속 (다른 Wi-Fi 또는 모바일 데이터 상태일 때 먼저 서버 NAT Wi-Fi로 전환)
+    // Step 2: 이미 동일 공유기(2.4GHz/5GHz 대역 또는 위치 권한 미허용 상태)에 연결되어 있는지 1차 빠른 핑 체크
+    for (ip in candidateIps) {
+        if (performHandshakeAndSave(
+                appPreferences = appPreferences,
+                ip = ip,
+                port = port,
+                token = token,
+                pcName = qrData.pcName,
+                serverSsid = serverSsid,
+                serverWifiPw = serverWifiPw
+            )
+        ) {
+            return true
+        }
+    }
+
+    // Step 3: 방식 A (ACTION_WIFI_ADD_NETWORKS) 기반 Wi-Fi 선(先) 등록·접속 유도 (타 Wi-Fi 또는 모바일 데이터 상태)
     if (serverSsid.isNotBlank() && !WifiConnector.isConnectedToTargetSsid(context, serverSsid)) {
-        onStatusUpdate("서버 소속 Wi-Fi [$serverSsid] 선(先) 접속 중...")
+        onStatusUpdate("서버 소속 Wi-Fi [$serverSsid] 등록 및 접속 대기 중...")
         WifiConnector.ensureWifiConnectedBeforeHandshake(
             context = context,
             targetSsid = serverSsid,
@@ -262,8 +278,8 @@ internal suspend fun executeQrPairingPipeline(
         )
     }
 
-    // Step 3: 핸드셰이크 자동 재시도 (Wi-Fi 전환 직후 DHCP/라우팅 지연 및 다중 IP 대응)
-    val maxAttempts = 8
+    // Step 4: 핸드셰이크 자동 폴링 재시도 (Wi-Fi 전환 직후 DHCP/라우팅 지연 및 다중 IP 대응)
+    val maxAttempts = 10
     for (attempt in 1..maxAttempts) {
         onStatusUpdate("myLore 서버 [${qrData.pcName}] 핸드셰이크 연결 시도 중 ($attempt/$maxAttempts)...")
         for (ip in candidateIps) {
