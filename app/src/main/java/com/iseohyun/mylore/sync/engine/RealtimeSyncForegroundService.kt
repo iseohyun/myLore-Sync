@@ -126,21 +126,55 @@ class RealtimeSyncForegroundService : Service() {
                                 val folderIdx = index + 1
                                 val folderReq = kInfo.folderName.toRequestBody("text/plain".toMediaTypeOrNull())
                                 val roomName = kInfo.roomKey.ifBlank { kInfo.folderName }
-                                val totalBytes = kInfo.file.length() + kInfo.mediaFiles.sumOf { it.length() }
-                                var syncedBytes = 0L
+                                val textBytes = kInfo.file.length()
+                                val totalMediaBytes = kInfo.mediaFiles.sumOf { it.length() }
+                                val totalBytes = textBytes + totalMediaBytes
 
-                                // 1-1. 폴더에 포함된 이미지·동영상 파일들을 수정 없이 그대로 `mobile/kakao/{folder_name}/`에 적재
-                                for (mediaFile in kInfo.mediaFiles) {
+                                // 1-0. 서버에 이미 존재하는 미디어 해시 사전 대조 (`check-hashes`)
+                                val mediaWithHashes = kInfo.mediaFiles.mapNotNull { file ->
+                                    val hash = KakaoChatFolderWatcher.calculateFileHash(file)
+                                    if (hash != null) Pair(file, hash) else null
+                                }
+                                val allHashes = mediaWithHashes.map { it.second }
+                                val missingHashes = if (allHashes.isNotEmpty()) {
+                                    try {
+                                        val checkRes = api.checkHashes(token, CheckHashesRequest(allHashes))
+                                        if (checkRes.isSuccessful && checkRes.body() != null) {
+                                            checkRes.body()!!.missingHashes.toSet()
+                                        } else {
+                                            allHashes.toSet()
+                                        }
+                                    } catch (_: Exception) {
+                                        allHashes.toSet()
+                                    }
+                                } else emptySet()
+
+                                // 서버에 이미 존재하는 파일들은 즉시 전송 완료 용량으로 계산
+                                var syncedBytes = mediaWithHashes
+                                    .filter { !missingHashes.contains(it.second) }
+                                    .sumOf { it.first.length() }
+                                prefs.updateRoomSyncProgress(roomName, syncedBytes, totalBytes, System.currentTimeMillis())
+
+                                var mediaUploadSuccessCount = mediaWithHashes.size - missingHashes.size
+
+                                // 1-1. 서버에 없는 신규 미디어 파일들만 업로드
+                                for ((mediaFile, hash) in mediaWithHashes) {
+                                    if (!missingHashes.contains(hash)) continue
                                     if (!mediaFile.exists() || !mediaFile.isFile) continue
-                                    val takenAtStr = isoFormat.format(Date(mediaFile.lastModified()))
-                                    val takenReq = takenAtStr.toRequestBody("text/plain".toMediaTypeOrNull())
-                                    val sourceReq = "kakao_export".toRequestBody("text/plain".toMediaTypeOrNull())
-                                    val mBody = mediaFile.asRequestBody("application/octet-stream".toMediaTypeOrNull())
-                                    val mPart = MultipartBody.Part.createFormData("file", mediaFile.name, mBody)
-                                    val res = api.uploadMediaFile(token, takenReq, sourceReq, mPart, folderReq)
-                                    if (res.isSuccessful && res.body()?.ok == true) {
-                                        syncedBytes += mediaFile.length()
-                                        prefs.updateRoomSyncProgress(roomName, syncedBytes, totalBytes, System.currentTimeMillis())
+                                    try {
+                                        val takenAtStr = isoFormat.format(Date(mediaFile.lastModified()))
+                                        val takenReq = takenAtStr.toRequestBody("text/plain".toMediaTypeOrNull())
+                                        val sourceReq = "kakao_export".toRequestBody("text/plain".toMediaTypeOrNull())
+                                        val mBody = mediaFile.asRequestBody("application/octet-stream".toMediaTypeOrNull())
+                                        val mPart = MultipartBody.Part.createFormData("file", mediaFile.name, mBody)
+                                        val res = api.uploadMediaFile(token, takenReq, sourceReq, mPart, folderReq)
+                                        if (res.isSuccessful && res.body()?.ok == true) {
+                                            syncedBytes += mediaFile.length()
+                                            mediaUploadSuccessCount++
+                                            prefs.updateRoomSyncProgress(roomName, syncedBytes, totalBytes, System.currentTimeMillis())
+                                        }
+                                    } catch (e: Exception) {
+                                        Log.w("SyncService", "Failed to upload kakao media file: ${mediaFile.name}", e)
                                     }
                                 }
 
@@ -152,29 +186,36 @@ class RealtimeSyncForegroundService : Service() {
                                 val idxReq = folderIdx.toString().toRequestBody("text/plain".toMediaTypeOrNull())
                                 val totalReq = totalFolders.toString().toRequestBody("text/plain".toMediaTypeOrNull())
 
-                                val uploadRes = api.uploadKakaoChatFile(
-                                    token,
-                                    folderReq,
-                                    hashReq,
-                                    modReq,
-                                    idxReq,
-                                    totalReq,
-                                    part
-                                )
-                                if (uploadRes.isSuccessful && uploadRes.body()?.ok == true) {
-                                    syncedBytes = totalBytes
-                                    prefs.updateRoomSyncProgress(roomName, totalBytes, totalBytes, System.currentTimeMillis())
-                                    prefs.updateLastKakaoTs(System.currentTimeMillis())
-                                    Log.d("SyncService", "Uploaded Kakao folder ($folderIdx/$totalFolders): ${kInfo.folderName}")
-                                    if (uploadRes.body()?.verifiedForCleanup == true) {
-                                        val parentFolder = kInfo.folder
-                                        if (parentFolder.exists() &&
-                                            (parentFolder.name.startsWith("KakaoTalk_Chats_") || parentFolder.parentFile?.name == "Chats")
-                                        ) {
-                                            val deleted = parentFolder.deleteRecursively()
-                                            Log.i("SyncService", "Deleted synced Kakao folder: ${parentFolder.name} ($deleted)")
+                                try {
+                                    val uploadRes = api.uploadKakaoChatFile(
+                                        token,
+                                        folderReq,
+                                        hashReq,
+                                        modReq,
+                                        idxReq,
+                                        totalReq,
+                                        part
+                                    )
+                                    if (uploadRes.isSuccessful && uploadRes.body()?.ok == true) {
+                                        syncedBytes += textBytes
+                                        if (mediaUploadSuccessCount >= mediaWithHashes.size) {
+                                            syncedBytes = totalBytes
+                                        }
+                                        prefs.updateRoomSyncProgress(roomName, syncedBytes, totalBytes, System.currentTimeMillis())
+                                        prefs.updateLastKakaoTs(System.currentTimeMillis())
+                                        Log.d("SyncService", "Uploaded Kakao folder ($folderIdx/$totalFolders): ${kInfo.folderName}")
+                                        if (uploadRes.body()?.verifiedForCleanup == true && mediaUploadSuccessCount >= mediaWithHashes.size) {
+                                            val parentFolder = kInfo.folder
+                                            if (parentFolder.exists() &&
+                                                (parentFolder.name.startsWith("KakaoTalk_Chats_") || parentFolder.parentFile?.name == "Chats")
+                                            ) {
+                                                val deleted = parentFolder.deleteRecursively()
+                                                Log.i("SyncService", "Deleted fully synced Kakao folder: ${parentFolder.name} ($deleted)")
+                                            }
                                         }
                                     }
+                                } catch (e: Exception) {
+                                    Log.w("SyncService", "Failed to upload kakao chat file for ${kInfo.folderName}", e)
                                 }
                             }
                         }
