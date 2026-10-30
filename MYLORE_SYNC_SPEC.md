@@ -39,10 +39,8 @@ PC `myLore` 앱은 `라이프로그 수집 대쉬보드(F8) > 모바일 기기 Q
   ],
   "port": 18443,
   "token": "mylore_sec_a8f9c1d2e3f4567890abcdef12345678",
-  "ssids": [
-    "iseohyun",
-    "seohyun5G"
-  ],
+  "ssid": "iseohyun",
+  "wifi_pw": "mypassword1234",
   "created_at": 1761650000000
 }
 ```
@@ -55,8 +53,11 @@ PC `myLore` 앱은 `라이프로그 수집 대쉬보드(F8) > 모바일 기기 Q
 | `ips` | Array<String> | PC의 로컬 네트워크 IP 목록 (이중 랜카드/Wi-Fi 대응) |
 | `port` | Integer | PC myLore HTTP 서버 포트 (기본값: `18443`) |
 | `token` | String | 양방향 REST API 인증용 고유 보안 토큰 (`X-MyLore-Token`) |
-| `ssids` | Array<String> | PC가 연결된 집 Wi-Fi SSID 목록 (모바일 자동 추가용) |
+| `ssid` | String | PC 서버가 소속된 NAT 공유기 Wi-Fi 네트워크 식별자 (모바일 자동 접속 및 연동용) |
+| `wifi_pw` | String | PC 서버 소속 Wi-Fi 네트워크 비밀번호 |
 | `created_at` | Long | QR 코드 생성 타임스탬프 (ms) |
+
+> **Wi-Fi 연동 정책 변경**: 사용자가 앱 설정에서 수동으로 허용 Wi-Fi SSID 목록을 일일이 추가/삭제하던 방식을 **전면 폐지**하고, 서버가 제공한 QR 코드 내 `ssid` 및 `wifi_pw` 정보를 바탕으로 모바일 기기가 서버 소속 NAT 공유기에 원클릭으로 접속하여 연동되도록 간소화했습니다.
 
 ---
 
@@ -69,12 +70,12 @@ sequenceDiagram
     participant DS as 💾 DataStore (로컬)
 
     Note over PC: 1. PC 대시보드 > [모바일 기기 QR 페어링] 클릭
-    PC->>PC: 보안 토큰 생성 & QR 코드(JSON) 화면 표시
+    PC->>PC: 보안 토큰 생성 & 서버 소속 NAT Wi-Fi(SSID, PW) 포함 QR 코드(JSON) 표시
 
     Note over App: 2. 모바일 앱 최초 실행 (온보딩)
     App->>App: [QR 코드로 자동 연결] 버튼 클릭 -> CameraX QR 스캐너 오픈
     App->>PC: PC 화면의 QR 코드 카메라 스캔
-    App->>App: QR JSON 파싱 (IP, Port, Token, SSIDs 추출)
+    App->>App: QR JSON 파싱 (IP, Port, Token, 서버 NAT SSID/PW 추출)
 
     Note over App,PC: 3. 서버 통신 테스트 & 핸드셰이크
     App->>PC: GET http://192.168.0.15:18443/api/v1/status (Header: X-MyLore-Token)
@@ -83,8 +84,9 @@ sequenceDiagram
     App->>PC: POST /api/v1/pair/confirm ({ device_name: "Galaxy S24", model: "SM-S921N" })
     PC-->>App: { ok: true, registered_device_id: "dev_98765" }
 
-    Note over App: 4. 설정 저장 & 온보딩 완료
-    App->>DS: IP, Port, Token, SSIDs 저장 (is_paired = true)
+    Note over App: 4. 설정 저장 & 서버 Wi-Fi 연동
+    App->>DS: IP, Port, Token, 서버 Wi-Fi SSID/PW 저장 (is_paired = true)
+    App->>App: 필요 시 서버 소속 Wi-Fi 자동 제안(Suggestion) 및 연결 유도
     App-->>PC: 대시보드에 "연결 완료" 상태 표시 & PC에 "스마트폰 연결됨" 알림
 ```
 
@@ -431,5 +433,5 @@ myLore Sync (스마트폰 라이프로그 동기화)
 | **🎙️ 녹음** (`RecordingsListScreen`) | • `Recordings/Voice Recorder`, `Sounds/Watch`, `TPhoneCallRecords` 등 기기 내 전체 음성 녹음 파일 스캔<br>• 각 녹음 건별 파일 크기, 녹음 일시 및 서버 전송 상태 배지<br>• 상단 요약 카드: **"보유 녹음 파일 수 및 가장 오래된 녹음 시점"** 표시 |
 | **🏃 헬스** (`HealthSyncScreen`) | • `Download/Samsung Health` 내 운동 세션 CSV 및 워치 GPS 이동 경로 JSON 요약<br>• PC 서버로 전송할 헬스 데이터 현황 표시<br>• **"모든 데이터를 전송하고 완료되면 데이터 삭제"** 기능 (`deleteRecursively()` 안전 다이얼로그 연동) |
 | **📇 명함** (`BusinessCardWalletScreen`) | • 상단 우측 `➕` 버튼: 실시간 누적 명함 스캐너(`LiveCardScannerActivity`) 실행<br>• 이름, 회사명, 직책, 전화번호 검색창<br>• 보관 중인 명함 목록 카드 (회사명과 직책/직급 다른 행 분리 렌더링) |
-| **📊 상태** (`StatusDashboardContent`) | • 3대 동기화 조건 실시간 상태 카드: **1. 지정 Wi-Fi 연결 여부**, **2. 배터리 충전 중 여부**, **3. myLore 서버 연결 여부**<br>• 서버가 켜져있음에도 오프라인으로 감지될 경우, 상태 카드 내 **[오프라인 (클릭하여 QR 재연결)]**을 탭하여 PC 화면의 QR 코드를 스캔함으로써 즉시 재연결 및 IP/포트/토큰 자동 갱신 지원<br>• `🔄 수동 동기화` 및 `📷 실시간 누적 스캔` 바로가기 버튼<br>• 실시간 라이프로그 전송 로그 터미널 뷰어 |
-| **⚙️ 설정** (`SettingsScreen`) | • **9대 시스템 권한 실시간 상태 배지 (`[허용됨]` / `[미허용]`) 및 항목별 `[열기]` 버튼**: 알림 접근, 앱 사용정보, 모든 파일 접근, 연락처, 문자, 통화 기록, 위치, 카메라, 배터리 최적화 예외<br>• myLore Sync 전체 앱 상세 설정 원클릭 버튼<br>• 자동 동기화 허용 Wi-Fi SSID 등록 및 관리<br>• PC IP / 포트 / 토큰 정보 및 PC 연동 해제(Unpair) 기능 |
+| **📊 상태** (`StatusDashboardContent`) | • 3대 동기화 조건 실시간 상태 카드: **1. 서버 Wi-Fi 연결 여부 (미연결 시 탭하여 서버 Wi-Fi 원클릭 연결)**, **2. 배터리 충전 중 여부**, **3. myLore 서버 연결 여부**<br>• 서버가 켜져있음에도 오프라인으로 감지될 경우, 상태 카드 내 **[오프라인 (클릭하여 QR 재연결)]**을 탭하여 PC 화면의 QR 코드를 스캔함으로써 즉시 재연결 및 IP/포트/토큰/서버 Wi-Fi 자동 갱신 지원<br>• `🔄 수동 동기화` 및 `📷 실시간 누적 스캔` 바로가기 버튼<br>• 실시간 라이프로그 전송 로그 터미널 뷰어 |
+| **⚙️ 설정** (`SettingsScreen`) | • **9대 시스템 권한 실시간 상태 배지 (`[허용됨]` / `[미허용]`) 및 항목별 `[열기]` 버튼**: 알림 접근, 앱 사용정보, 모든 파일 접근, 연락처, 문자, 통화 기록, 위치, 카메라, 배터리 최적화 예외<br>• myLore Sync 전체 앱 상세 설정 원클릭 버튼<br>• **서버 소속 Wi-Fi (NAT)**: 수동 SSID 목록 관리 전면 제거 완료, QR 페어링으로 수신된 서버 소속 Wi-Fi(SSID 및 비밀번호) 정보 표시 및 원클릭 Wi-Fi 연결 지원<br>• PC IP / 포트 / 토큰 정보 및 PC 연동 해제(Unpair) 기능 |

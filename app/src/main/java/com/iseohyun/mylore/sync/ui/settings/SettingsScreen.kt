@@ -43,9 +43,8 @@ fun SettingsScreen(
     val pcIp by appPreferences.pcIp.collectAsState(initial = "")
     val pcPort by appPreferences.pcPort.collectAsState(initial = AppPreferences.DEFAULT_PORT)
     val pairingToken by appPreferences.pairingToken.collectAsState(initial = "")
-    val allowedSsids by appPreferences.allowedSsids.collectAsState(initial = AppPreferences.DEFAULT_SSIDS)
-
-    var newSsidInput by remember { mutableStateOf("") }
+    val serverSsid by appPreferences.serverSsid.collectAsState(initial = "")
+    val serverWifiPw by appPreferences.serverWifiPw.collectAsState(initial = "")
 
     // 권한 실시간 체크 상태
     fun checkPermissionsState(): Map<String, Boolean> {
@@ -180,51 +179,48 @@ fun SettingsScreen(
 
         Spacer(modifier = Modifier.height(20.dp))
 
-        // Section 2: Wi-Fi SSIDs
-        Text("허용 Wi-Fi SSID 목록", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-        Text("집 Wi-Fi의 SSID를 등록하면 해당 Wi-Fi 연결 시 자동 동기화됩니다.", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        // Section 2: Server Wi-Fi (NAT) Connection
+        Text("서버 소속 Wi-Fi (NAT)", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+        Text("QR 코드 페어링 시 전달받은 서버 소속 공유기(Wi-Fi) 정보입니다.", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(modifier = Modifier.height(8.dp))
 
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(14.dp)) {
-                allowedSsids.forEach { ssid ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("네트워크 (SSID):", fontSize = 14.sp)
+                    Text(
+                        if (serverSsid.isNotBlank()) serverSsid else "미등록 (QR 스캔 필요)",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (serverSsid.isNotBlank()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                if (serverWifiPw.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(6.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("• $ssid", fontSize = 15.sp)
-                        IconButton(onClick = {
-                            scope.launch {
-                                appPreferences.setAllowedSsids(allowedSsids - ssid)
-                            }
-                        }) {
-                            Text("❌", fontSize = 14.sp)
-                        }
+                        Text("비밀번호:", fontSize = 14.sp)
+                        Text("•••••••• (보안 저장됨)", fontSize = 14.sp, color = MaterialTheme.colorScheme.outline)
                     }
                 }
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    OutlinedTextField(
-                        value = newSsidInput,
-                        onValueChange = { newSsidInput = it },
-                        label = { Text("새 SSID 추가") },
-                        modifier = Modifier.weight(1f),
-                        singleLine = true
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Button(onClick = {
-                        if (newSsidInput.isNotBlank()) {
-                            scope.launch {
-                                appPreferences.setAllowedSsids(allowedSsids + newSsidInput.trim())
-                                newSsidInput = ""
-                            }
-                        }
-                    }) {
-                        Text("추가")
+                if (serverSsid.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Button(
+                        onClick = {
+                            com.iseohyun.mylore.sync.engine.WifiConnector.connectOrSuggestWifi(context, serverSsid, serverWifiPw)
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("📶 서버 Wi-Fi [$serverSsid] 연결")
                     }
                 }
             }

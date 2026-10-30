@@ -188,7 +188,8 @@ private fun StatusDashboardContent(
     val pcPort by appPreferences.pcPort.collectAsState(initial = AppPreferences.DEFAULT_PORT)
     val pairingToken by appPreferences.pairingToken.collectAsState(initial = "")
     val pcName by appPreferences.pcName.collectAsState(initial = "MYLORE-PC")
-    val allowedSsids by appPreferences.allowedSsids.collectAsState(initial = AppPreferences.DEFAULT_SSIDS)
+    val serverSsid by appPreferences.serverSsid.collectAsState(initial = "")
+    val serverWifiPw by appPreferences.serverWifiPw.collectAsState(initial = "")
 
     var isCharging by remember { mutableStateOf(false) }
     var currentSsid by remember { mutableStateOf("") }
@@ -212,6 +213,8 @@ private fun StatusDashboardContent(
                     val ip = qrData.ips.first()
                     val port = qrData.port
                     val token = qrData.token
+                    val targetSsid = qrData.targetSsid
+                    val targetWifiPw = qrData.targetWifiPw
 
                     val success = performHandshakeAndSave(
                         appPreferences = appPreferences,
@@ -219,10 +222,14 @@ private fun StatusDashboardContent(
                         port = port,
                         token = token,
                         pcName = qrData.pcName,
-                        ssids = qrData.ssids.toSet()
+                        serverSsid = targetSsid,
+                        serverWifiPw = targetWifiPw
                     )
                     if (success) {
                         Toast.makeText(context, "myLore 서버 [${qrData.pcName}]와 재연결되었습니다!", Toast.LENGTH_SHORT).show()
+                        if (targetSsid.isNotBlank()) {
+                            com.iseohyun.mylore.sync.engine.WifiConnector.connectOrSuggestWifi(context, targetSsid, targetWifiPw)
+                        }
                         val (reachable, _, _) = monitor.pingPcServer(ip, port, token)
                         isPcReachable = reachable
                     } else {
@@ -235,10 +242,10 @@ private fun StatusDashboardContent(
         }
     }
 
-    LaunchedEffect(pcIp, pcPort, pairingToken) {
+    LaunchedEffect(pcIp, pcPort, pairingToken, serverSsid) {
         while (true) {
             isCharging = monitor.checkChargingStatus()
-            val (wifiConn, ssid) = monitor.checkWifiInfo(allowedSsids)
+            val (wifiConn, ssid) = monitor.checkWifiInfo()
             isWifiConnected = wifiConn
             currentSsid = ssid
 
@@ -246,7 +253,8 @@ private fun StatusDashboardContent(
             isPcReachable = reachable
             hasUsagePermission = usageCollector.hasUsagePermission()
 
-            val isAllMet = (allowedSsids.contains(ssid) || (wifiConn && reachable)) && isCharging && reachable
+            val isServerWifi = (serverSsid.isNotBlank() && ssid.equals(serverSsid, ignoreCase = true)) || (wifiConn && reachable)
+            val isAllMet = isServerWifi && isCharging && reachable
             if (isAllMet) {
                 RealtimeSyncForegroundService.startService(context)
             }
@@ -329,10 +337,29 @@ private fun StatusDashboardContent(
                 Text("3대 동기화 조건 실시간 상태", fontWeight = FontWeight.Bold, fontSize = 16.sp)
                 Spacer(modifier = Modifier.height(12.dp))
 
+                val isServerWifiOk = (serverSsid.isNotBlank() && currentSsid.equals(serverSsid, ignoreCase = true)) || (isWifiConnected && isPcReachable)
+                val wifiStatusValue = when {
+                    isWifiConnected && serverSsid.isNotBlank() && currentSsid.equals(serverSsid, ignoreCase = true) ->
+                        "연결됨 ($currentSsid)"
+                    isWifiConnected && serverSsid.isNotBlank() ->
+                        "연결됨 ($currentSsid) [서버: $serverSsid]"
+                    isWifiConnected ->
+                        "연결됨 (${currentSsid.ifBlank { "SSID 감지 중" }})"
+                    serverSsid.isNotBlank() ->
+                        "미연결 (클릭하여 $serverSsid 연결)"
+                    else ->
+                        "미연결"
+                }
+
                 StatusRow(
-                    label = "1. 지정 Wi-Fi 연결",
-                    value = if (isWifiConnected) "연결됨 (${currentSsid.ifBlank { "SSID 감지 중" }})" else "미연결",
-                    isOk = allowedSsids.contains(currentSsid) || (isWifiConnected && isPcReachable)
+                    label = "1. 서버 Wi-Fi 연결",
+                    value = wifiStatusValue,
+                    isOk = isServerWifiOk,
+                    onClick = if (serverSsid.isNotBlank() && !currentSsid.equals(serverSsid, ignoreCase = true)) {
+                        {
+                            com.iseohyun.mylore.sync.engine.WifiConnector.connectOrSuggestWifi(context, serverSsid, serverWifiPw)
+                        }
+                    } else null
                 )
 
                 Spacer(modifier = Modifier.height(8.dp))

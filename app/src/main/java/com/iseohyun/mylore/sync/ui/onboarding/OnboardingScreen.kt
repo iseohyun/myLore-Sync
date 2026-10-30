@@ -46,17 +46,24 @@ fun OnboardingScreen(
                     val port = qrData.port
                     val token = qrData.token
 
+                    val serverSsid = qrData.targetSsid
+                    val serverWifiPw = qrData.targetWifiPw
+
                     val success = performHandshakeAndSave(
                         appPreferences = appPreferences,
                         ip = ip,
                         port = port,
                         token = token,
                         pcName = qrData.pcName,
-                        ssids = qrData.ssids.toSet()
+                        serverSsid = serverSsid,
+                        serverWifiPw = serverWifiPw
                     )
                     isLoading = false
                     if (success) {
-                        Toast.makeText(context, "PC [${qrData.pcName}]와 연결되었습니다!", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "myLore [${qrData.pcName}]와 연결되었습니다!", Toast.LENGTH_SHORT).show()
+                        if (serverSsid.isNotBlank()) {
+                            com.iseohyun.mylore.sync.engine.WifiConnector.connectOrSuggestWifi(context, serverSsid, serverWifiPw)
+                        }
                         onPairingSuccess()
                     } else {
                         Toast.makeText(context, "PC 서버 연결에 실패했습니다. PC가 실행 중인지 확인하세요.", Toast.LENGTH_LONG).show()
@@ -221,7 +228,8 @@ internal suspend fun performHandshakeAndSave(
     port: Int,
     token: String,
     pcName: String = "MYLORE-PC",
-    ssids: Set<String> = emptySet()
+    serverSsid: String = "",
+    serverWifiPw: String = ""
 ): Boolean {
     return withContext(Dispatchers.IO) {
         try {
@@ -244,7 +252,8 @@ internal suspend fun performHandshakeAndSave(
                     port = port,
                     token = token,
                     pcName = realPcName,
-                    ssids = ssids
+                    serverSsid = serverSsid,
+                    serverWifiPw = serverWifiPw
                 )
                 true
             } else {
