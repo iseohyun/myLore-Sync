@@ -23,7 +23,8 @@ class AppPreferences(private val context: Context) {
         private val KEY_PC_IP = stringPreferencesKey("pc_ip")
         private val KEY_PC_PORT = intPreferencesKey("pc_port")
         private val KEY_PAIRING_TOKEN = stringPreferencesKey("pairing_token")
-        private val KEY_ALLOWED_SSIDS = stringSetPreferencesKey("allowed_ssids")
+        private val KEY_SERVER_SSID = stringPreferencesKey("server_ssid")
+        private val KEY_SERVER_WIFI_PW = stringPreferencesKey("server_wifi_pw")
         private val KEY_IS_PAIRED = booleanPreferencesKey("is_paired")
         private val KEY_PC_NAME = stringPreferencesKey("pc_name")
 
@@ -36,7 +37,6 @@ class AppPreferences(private val context: Context) {
         private val KEY_LAST_CONTACT_TS = longPreferencesKey("last_contact_ts")
         private val KEY_LAST_USAGE_TS = longPreferencesKey("last_usage_ts")
 
-        val DEFAULT_SSIDS = setOf("iseohyun", "seohyun5G")
         const val DEFAULT_PORT = 18443
     }
 
@@ -52,8 +52,12 @@ class AppPreferences(private val context: Context) {
         prefs[KEY_PAIRING_TOKEN] ?: ""
     }
 
-    val allowedSsids: Flow<Set<String>> = context.dataStore.data.map { prefs ->
-        prefs[KEY_ALLOWED_SSIDS] ?: DEFAULT_SSIDS
+    val serverSsid: Flow<String> = context.dataStore.data.map { prefs ->
+        prefs[KEY_SERVER_SSID] ?: ""
+    }
+
+    val serverWifiPw: Flow<String> = context.dataStore.data.map { prefs ->
+        prefs[KEY_SERVER_WIFI_PW] ?: ""
     }
 
     val isPaired: Flow<Boolean> = context.dataStore.data.map { prefs ->
@@ -101,7 +105,8 @@ class AppPreferences(private val context: Context) {
         port: Int,
         token: String,
         pcName: String = "MYLORE-PC",
-        ssids: Set<String>? = null
+        serverSsid: String = "",
+        serverWifiPw: String = ""
     ) {
         context.dataStore.edit { prefs ->
             prefs[KEY_PC_IP] = ip
@@ -109,16 +114,12 @@ class AppPreferences(private val context: Context) {
             prefs[KEY_PAIRING_TOKEN] = token
             prefs[KEY_PC_NAME] = pcName
             prefs[KEY_IS_PAIRED] = true
-            if (!ssids.isNullOrEmpty()) {
-                val currentSsids = prefs[KEY_ALLOWED_SSIDS] ?: DEFAULT_SSIDS
-                prefs[KEY_ALLOWED_SSIDS] = currentSsids + ssids
+            if (serverSsid.isNotBlank()) {
+                prefs[KEY_SERVER_SSID] = serverSsid
             }
-        }
-    }
-
-    suspend fun setAllowedSsids(ssids: Set<String>) {
-        context.dataStore.edit { prefs ->
-            prefs[KEY_ALLOWED_SSIDS] = ssids
+            if (serverWifiPw.isNotBlank()) {
+                prefs[KEY_SERVER_WIFI_PW] = serverWifiPw
+            }
         }
     }
 

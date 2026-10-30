@@ -15,7 +15,7 @@ import kotlinx.coroutines.withContext
 data class SyncConditionState(
     val isWifiConnected: Boolean = false,
     val currentSsid: String = "",
-    val isSsidAllowed: Boolean = false,
+    val isServerWifiMatched: Boolean = false,
     val isCharging: Boolean = false,
     val isPcReachable: Boolean = false,
     val pcName: String = "",
@@ -24,7 +24,7 @@ data class SyncConditionState(
     val lastNotiTs: Long = 0L
 ) {
     val isAllConditionsMet: Boolean
-        get() = (isSsidAllowed || (isWifiConnected && isPcReachable)) && isCharging && isPcReachable
+        get() = (isServerWifiMatched || (isWifiConnected && isPcReachable)) && isCharging && isPcReachable
 }
 
 class SyncConditionMonitor(private val context: Context) {
@@ -36,7 +36,7 @@ class SyncConditionMonitor(private val context: Context) {
         return status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
     }
 
-    fun checkWifiInfo(allowedSsids: Set<String>): Pair<Boolean, String> {
+    fun checkWifiInfo(): Pair<Boolean, String> {
         val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         val network = connectivityManager.activeNetwork ?: return Pair(false, "")
         val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return Pair(false, "")
