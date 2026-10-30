@@ -125,6 +125,9 @@ class RealtimeSyncForegroundService : Service() {
                             for ((index, kInfo) in kakaoFolders.withIndex()) {
                                 val folderIdx = index + 1
                                 val folderReq = kInfo.folderName.toRequestBody("text/plain".toMediaTypeOrNull())
+                                val roomName = kInfo.roomKey.ifBlank { kInfo.folderName }
+                                val totalBytes = kInfo.file.length() + kInfo.mediaFiles.sumOf { it.length() }
+                                var syncedBytes = 0L
 
                                 // 1-1. 폴더에 포함된 이미지·동영상 파일들을 수정 없이 그대로 `mobile/kakao/{folder_name}/`에 적재
                                 for (mediaFile in kInfo.mediaFiles) {
@@ -134,7 +137,11 @@ class RealtimeSyncForegroundService : Service() {
                                     val sourceReq = "kakao_export".toRequestBody("text/plain".toMediaTypeOrNull())
                                     val mBody = mediaFile.asRequestBody("application/octet-stream".toMediaTypeOrNull())
                                     val mPart = MultipartBody.Part.createFormData("file", mediaFile.name, mBody)
-                                    api.uploadMediaFile(token, takenReq, sourceReq, mPart, folderReq)
+                                    val res = api.uploadMediaFile(token, takenReq, sourceReq, mPart, folderReq)
+                                    if (res.isSuccessful && res.body()?.ok == true) {
+                                        syncedBytes += mediaFile.length()
+                                        prefs.updateRoomSyncProgress(roomName, syncedBytes, totalBytes, System.currentTimeMillis())
+                                    }
                                 }
 
                                 // 1-2. 대화 텍스트(`KakaoTalkChats.txt`) 및 폴더 순번(`folder_index` / `total_folders`) 전송
@@ -155,6 +162,8 @@ class RealtimeSyncForegroundService : Service() {
                                     part
                                 )
                                 if (uploadRes.isSuccessful && uploadRes.body()?.ok == true) {
+                                    syncedBytes = totalBytes
+                                    prefs.updateRoomSyncProgress(roomName, totalBytes, totalBytes, System.currentTimeMillis())
                                     prefs.updateLastKakaoTs(System.currentTimeMillis())
                                     Log.d("SyncService", "Uploaded Kakao folder ($folderIdx/$totalFolders): ${kInfo.folderName}")
                                     if (uploadRes.body()?.verifiedForCleanup == true) {

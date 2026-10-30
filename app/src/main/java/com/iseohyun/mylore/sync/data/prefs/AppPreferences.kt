@@ -6,7 +6,14 @@ import androidx.datastore.preferences.core.*
 import androidx.datastore.preferences.preferencesDataStore
 import com.iseohyun.mylore.sync.data.remote.dto.StatusResponse
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+
+data class RoomSyncProgress(
+    val syncedBytes: Long,
+    val totalBytes: Long,
+    val lastSharedTs: Long
+)
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "mylore_preferences")
 
@@ -112,6 +119,40 @@ class AppPreferences(private val context: Context) {
     suspend fun setAllowedSsids(ssids: Set<String>) {
         context.dataStore.edit { prefs ->
             prefs[KEY_ALLOWED_SSIDS] = ssids
+        }
+    }
+
+    private fun getRoomKeyHash(roomName: String): String {
+        return try {
+            val digest = java.security.MessageDigest.getInstance("MD5")
+            digest.digest(roomName.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+        } catch (_: Exception) {
+            roomName.filter { it.isLetterOrDigit() }.take(32)
+        }
+    }
+
+    suspend fun getRoomSyncProgress(roomName: String): RoomSyncProgress {
+        val hash = getRoomKeyHash(roomName)
+        val keySynced = longPreferencesKey("kakao_room_${hash}_synced")
+        val keyTotal = longPreferencesKey("kakao_room_${hash}_total")
+        val keyTs = longPreferencesKey("kakao_room_${hash}_ts")
+        val prefs = context.dataStore.data.first()
+        return RoomSyncProgress(
+            syncedBytes = prefs[keySynced] ?: 0L,
+            totalBytes = prefs[keyTotal] ?: 0L,
+            lastSharedTs = prefs[keyTs] ?: 0L
+        )
+    }
+
+    suspend fun updateRoomSyncProgress(roomName: String, syncedBytes: Long, totalBytes: Long, lastSharedTs: Long) {
+        val hash = getRoomKeyHash(roomName)
+        val keySynced = longPreferencesKey("kakao_room_${hash}_synced")
+        val keyTotal = longPreferencesKey("kakao_room_${hash}_total")
+        val keyTs = longPreferencesKey("kakao_room_${hash}_ts")
+        context.dataStore.edit { prefs ->
+            prefs[keySynced] = syncedBytes
+            prefs[keyTotal] = totalBytes
+            prefs[keyTs] = lastSharedTs
         }
     }
 

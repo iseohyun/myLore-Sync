@@ -127,6 +127,7 @@ fun DashboardScreen(
             }
             DrawerItem.KAKAO -> {
                 KakaoListScreen(
+                    appPreferences = appPreferences,
                     onOpenDrawer = { scope.launch { drawerState.open() } }
                 )
             }
