@@ -24,6 +24,72 @@ class CallRecordingCollector {
     companion object {
         private const val TAG = "CallRecordCollector"
         private val AUDIO_EXTENSIONS = setOf("m4a", "amr", "mp3", "wav")
+
+        /**
+         * 통화 녹음 파일인지 일반 음성 녹음(Voice Recorder, 워치 음성메모 등)인지 판별합니다.
+         */
+        fun isCallRecording(rec: RecordingCacheEntity): Boolean {
+            val pathLower = rec.filePath.lowercase(Locale.ROOT)
+            val parentLower = rec.parentFolderName.lowercase(Locale.ROOT)
+            val nameLower = rec.fileName.lowercase(Locale.ROOT)
+
+            if (parentLower.contains("voice recorder") ||
+                parentLower.contains("sounds") ||
+                parentLower.contains("watch") ||
+                rec.contactName == "Voice Recorder" ||
+                rec.contactName == "Watch Voice Memo"
+            ) {
+                return false
+            }
+
+            if (pathLower.contains("/recordings/call") ||
+                pathLower.contains("/tphonecallrecords") ||
+                parentLower == "call" ||
+                nameLower.startsWith("#") ||
+                nameLower.contains("통화 녹음") ||
+                nameLower.contains("통화녹음") ||
+                rec.phoneNumber.isNotBlank()
+            ) {
+                return true
+            }
+
+            return false
+        }
+
+        private fun normalizePhoneTail(raw: String): String {
+            val digits = raw.filter { it.isDigit() }
+            return if (digits.length >= 8) digits.takeLast(8) else digits
+        }
+
+        /**
+         * 통화 기록(CallLog)과 단말 내 통화 녹음 파일을 하나의 논리적 이벤트로 매칭합니다.
+         * - 전화번호 끝 8자리가 일치(또는 녹음 파일명에 번호가 없는 경우)하고,
+         *   녹음 시각이 [통화 시작 - 30초 ~ 통화 종료 + 90초] 이내인 가장 가까운 통화 녹음을 반환합니다.
+         */
+        fun findMatchingCallRecording(
+            call: com.iseohyun.mylore.sync.data.remote.dto.SyncCallLogItem,
+            callRecordings: List<RecordingCacheEntity>
+        ): RecordingCacheEntity? {
+            if (call.durationSec <= 0L) return null
+            val callStartMs = call.ts
+            val callEndMs = call.ts + (call.durationSec * 1000L)
+            val callPhoneTail = normalizePhoneTail(call.number)
+
+            return callRecordings.filter { rec ->
+                val recPhoneTail = normalizePhoneTail(rec.phoneNumber)
+                val phoneMatches = callPhoneTail.isNotBlank() &&
+                    recPhoneTail.isNotBlank() &&
+                    callPhoneTail == recPhoneTail
+
+                if (phoneMatches) {
+                    rec.recordedAt in (callStartMs - 30_000L)..(callEndMs + 90_000L)
+                } else if (recPhoneTail.isBlank()) {
+                    rec.recordedAt in (callStartMs - 15_000L)..(callEndMs + 60_000L)
+                } else {
+                    false
+                }
+            }.minByOrNull { kotlin.math.abs(it.recordedAt - callStartMs) }
+        }
     }
 
     private fun getCandidateDirs(): List<File> = listOf(

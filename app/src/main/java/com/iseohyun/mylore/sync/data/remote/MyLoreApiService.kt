@@ -30,6 +30,24 @@ interface MyLoreApiService {
         @Body request: SyncReconcileRequest
     ): Response<SyncManifestResponse>
 
+    @POST("/api/v1/sync/session-plan")
+    suspend fun sendSessionPlan(
+        @Header("X-MyLore-Token") token: String,
+        @Body request: SessionPlanRequest
+    ): Response<SyncResponse>
+
+    @POST("/api/v1/sync/complete")
+    suspend fun completeSyncSession(
+        @Header("X-MyLore-Token") token: String,
+        @Body request: SyncCompleteRequest
+    ): Response<SyncCompleteResponse>
+
+    @POST("/api/v1/sync/ack")
+    suspend fun sendSyncAck(
+        @Header("X-MyLore-Token") token: String,
+        @Body request: SyncAckRequest
+    ): Response<SyncAckResponse>
+
     @POST("/api/v1/sync/batch-init")
     suspend fun batchInit(
         @Header("X-MyLore-Token") token: String,
@@ -109,5 +127,11 @@ interface MyLoreApiService {
         @Part("source_type") sourceType: RequestBody,
         @Part file: MultipartBody.Part,
         @Part("folder_name") folderName: RequestBody? = null
+    ): Response<SyncResponse>
+
+    @POST("/api/v1/sync/samsung-health")
+    suspend fun uploadSamsungHealth(
+        @Header("X-MyLore-Token") token: String,
+        @Body body: RequestBody
     ): Response<SyncResponse>
 }

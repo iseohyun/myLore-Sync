@@ -193,9 +193,11 @@ private fun StatusDashboardContent(
     val serverWifiPw by appPreferences.serverWifiPw.collectAsState(initial = "")
 
     var isCharging by remember { mutableStateOf(false) }
+    var batteryPct by remember { mutableStateOf(100) }
     var currentSsid by remember { mutableStateOf("") }
     var isWifiConnected by remember { mutableStateOf(false) }
     var isPcReachable by remember { mutableStateOf(false) }
+    var isSessionActive by remember { mutableStateOf(false) }
 
     val usageCollector = remember { AppUsageCollector(context) }
     var hasUsagePermission by remember { mutableStateOf(usageCollector.hasUsagePermission()) }
@@ -240,7 +242,10 @@ private fun StatusDashboardContent(
 
     LaunchedEffect(pcIp, pcPort, pairingToken, serverSsid) {
         while (true) {
-            isCharging = monitor.checkChargingStatus()
+            val batteryInfo = monitor.checkBatteryInfo()
+            isCharging = batteryInfo.isCharging
+            batteryPct = batteryInfo.batteryPct
+
             val (wifiConn, ssid) = monitor.checkWifiInfo()
             isWifiConnected = wifiConn
             currentSsid = ssid
@@ -249,10 +254,15 @@ private fun StatusDashboardContent(
             isPcReachable = reachable
             hasUsagePermission = usageCollector.hasUsagePermission()
 
-            val isServerWifi = (serverSsid.isNotBlank() && ssid.equals(serverSsid, ignoreCase = true)) || (wifiConn && reachable)
-            val isAllMet = isServerWifi && isCharging && reachable
+            val batteryOk = batteryInfo.isBatteryOk(isActiveSession = isSessionActive)
+            val isAllMet = batteryOk && reachable
             if (isAllMet) {
-                RealtimeSyncForegroundService.startService(context)
+                if (!isSessionActive) {
+                    isSessionActive = true
+                    RealtimeSyncForegroundService.startService(context)
+                }
+            } else {
+                isSessionActive = false
             }
 
             kotlinx.coroutines.delay(3000)
@@ -324,52 +334,38 @@ private fun StatusDashboardContent(
             Spacer(modifier = Modifier.height(12.dp))
         }
 
-        // 3 Conditions Status Card
+        // 2 Conditions Status Card
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                Text("3대 동기화 조건 실시간 상태", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                Text("동기화 조건 실시간 상태", fontWeight = FontWeight.Bold, fontSize = 16.sp)
                 Spacer(modifier = Modifier.height(12.dp))
 
-                val isServerWifiOk = (serverSsid.isNotBlank() && currentSsid.equals(serverSsid, ignoreCase = true)) || (isWifiConnected && isPcReachable)
-                val wifiStatusValue = when {
-                    isWifiConnected && serverSsid.isNotBlank() && currentSsid.equals(serverSsid, ignoreCase = true) ->
-                        "연결됨 ($currentSsid)"
-                    isWifiConnected && serverSsid.isNotBlank() ->
-                        "연결됨 ($currentSsid) [서버: $serverSsid]"
-                    isWifiConnected ->
-                        "연결됨 (${currentSsid.ifBlank { "SSID 감지 중" }})"
-                    serverSsid.isNotBlank() ->
-                        "미연결 (클릭하여 $serverSsid 연결)"
-                    else ->
-                        "미연결"
+                val isBatteryOk = isCharging || batteryPct >= if (isSessionActive) {
+                    SyncConditionMonitor.BATTERY_RETENTION_THRESHOLD_PCT
+                } else {
+                    SyncConditionMonitor.BATTERY_START_THRESHOLD_PCT
+                }
+                val batteryStatusText = when {
+                    isCharging -> "충전 중 ($batteryPct%)"
+                    batteryPct >= SyncConditionMonitor.BATTERY_START_THRESHOLD_PCT -> "충분 ($batteryPct% ≥ 80%)"
+                    isSessionActive && batteryPct >= SyncConditionMonitor.BATTERY_RETENTION_THRESHOLD_PCT ->
+                        "유지 중 ($batteryPct% ≥ 75%)"
+                    else -> "대기 ($batteryPct% - 충전 또는 80% 필요)"
                 }
 
                 StatusRow(
-                    label = "1. 서버 Wi-Fi 연결",
-                    value = wifiStatusValue,
-                    isOk = isServerWifiOk,
-                    onClick = if (serverSsid.isNotBlank() && !currentSsid.equals(serverSsid, ignoreCase = true)) {
-                        {
-                            com.iseohyun.mylore.sync.engine.WifiConnector.connectOrSuggestWifi(context, serverSsid, serverWifiPw)
-                        }
-                    } else null
+                    label = "1. 배터리 (충전 중 or 80%↑)",
+                    value = batteryStatusText,
+                    isOk = isBatteryOk
                 )
 
                 Spacer(modifier = Modifier.height(8.dp))
 
                 StatusRow(
-                    label = "2. 충전 중 상태",
-                    value = if (isCharging) "충전 중 (Charging)" else "충전기 미연결",
-                    isOk = isCharging
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                StatusRow(
-                    label = "3. myLore 서버",
+                    label = "2. myLore 서버 연결",
                     value = if (isPcReachable) "온라인 (Online)" else "오프라인 (클릭하여 QR 재연결)",
                     isOk = isPcReachable,
                     onClick = if (!isPcReachable) {
@@ -386,6 +382,18 @@ private fun StatusDashboardContent(
                         }
                     } else null
                 )
+
+                if (!isPcReachable && serverSsid.isNotBlank() && !currentSsid.equals(serverSsid, ignoreCase = true)) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    StatusRow(
+                        label = "↳ 서버 Wi-Fi 접속",
+                        value = "미연결 (클릭하여 $serverSsid 연결)",
+                        isOk = false,
+                        onClick = {
+                            com.iseohyun.mylore.sync.engine.WifiConnector.connectOrSuggestWifi(context, serverSsid, serverWifiPw)
+                        }
+                    )
+                }
             }
         }
 

@@ -78,7 +78,7 @@ class KakaoChatFolderWatcher {
         "Documents/KakaoTalk/Chats"
     )
 
-    fun scanBackupFiles(): List<KakaoChatFileInfo> {
+    fun scanBackupFiles(lazyHash: Boolean = true): List<KakaoChatFileInfo> {
         val results = mutableListOf<KakaoChatFileInfo>()
 
         if (!targetFolder.exists() || !targetFolder.isDirectory) {
@@ -97,7 +97,7 @@ class KakaoChatFolderWatcher {
                 !it.name.endsWith(".txt", ignoreCase = true) && !it.name.endsWith(".csv", ignoreCase = true)
             }
             for (txtFile in txtFiles) {
-                val hash = calculateFileHash(txtFile) ?: continue
+                val hash = if (lazyHash) "" else (calculateFileHash(txtFile) ?: continue)
                 val roomKey = extractRoomKey(txtFile, folder.name)
                 val (lastLine, lastMsgTs) = readLastLineFast(txtFile)
                 results.add(
@@ -177,12 +177,23 @@ class KakaoChatFolderWatcher {
 
             var syncedBytes = cached?.syncedBytes ?: 0L
             var lastSharedTime = cached?.lastSharedTime ?: 0L
+            var knownSyncedMsgTs = if (cached != null && cached.lastSharedTime > 0L) cached.lastMessageTime else 0L
             if (prefs != null) {
                 val syncState = prefs.getRoomSyncProgress(roomKey)
                 if (syncState.syncedBytes > 0L || syncState.lastSharedTs > 0L) {
                     syncedBytes = maxOf(syncedBytes, syncState.syncedBytes)
                     lastSharedTime = maxOf(lastSharedTime, syncState.lastSharedTs)
                 }
+                if (syncState.lastSyncedMessageTs > 0L) {
+                    knownSyncedMsgTs = maxOf(knownSyncedMsgTs, syncState.lastSyncedMessageTs)
+                }
+            }
+
+            if (knownSyncedMsgTs > 0L) {
+                val priorMediaBytes = mediaFiles
+                    .filter { it.lastModified() <= knownSyncedMsgTs }
+                    .sumOf { it.length() }
+                syncedBytes = maxOf(syncedBytes, priorMediaBytes)
             }
 
             // 파일 수정 시각과 전체 크기가 동일하면 무거운 텍스트 파싱 생략
@@ -196,6 +207,10 @@ class KakaoChatFolderWatcher {
             } else {
                 val (line, ts) = readLastLineFast(txtFile)
                 Pair(line.ifBlank { "대화 내용 없음" }, ts)
+            }
+
+            if (knownSyncedMsgTs > 0L && lastMsgTime in 1..knownSyncedMsgTs) {
+                syncedBytes = totalBytes
             }
 
             val percent = when {
