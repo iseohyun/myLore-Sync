@@ -208,6 +208,8 @@ com.iseohyun.mylore.sync/
 | `GET /api/v1/status` | PC 상태 및 8대 카테고리 증분 타임스탬프 조회 | None (또는 `device_id` 쿼리) | `{ "ok": true, "pc_name": "...", "force_full_sync": false, "last_kakao_ts": 0, "last_sms_ts": 0, "last_call_ts": 0, "last_noti_ts": 0, "last_recording_ts": 0, "last_health_ts": 0, "last_contact_ts": 0, "last_usage_ts": 0 }` |
 | `POST /api/v1/pair/confirm` | QR 페어링 승인 및 기기 등록 | `{ "device_name": "Galaxy S24", "model": "SM-S921N", "android_version": "15", "app_version": "1.0" }` | `{ "ok": true, "registered_device_id": "dev_..." }` |
 | `POST /api/v1/sync/watermarks` | 8대 서비스별 전송 완료 시점(워터마크) 상호 공유 및 최댓값 병합 | `{ "last_kakao_ts": 0, "last_sms_ts": 0, "last_call_ts": 0, "last_noti_ts": 0, "last_recording_ts": 0, "last_health_ts": 0, "last_contact_ts": 0, "last_usage_ts": 0 }` | `{ "ok": true, "pc_name": "...", "force_full_sync": false, "last_*_ts": ... }` |
+| `GET /api/v1/sync/manifest` | 서버가 보유한 6대 카테고리 전송 완료 목록(카톡 대화방별 마지막 대화 시각, 헬스 최신 파일 종류/시각, 녹음 해시 목록 등) 조회 | None (또는 `device_id` 쿼리) | `SyncManifestResponse` (`kakao_rooms`, `health_records`, `synced_recording_hashes`, `synced_sms_ids`, `synced_call_ids`, `synced_noti_ids`, `last_*_ts`) |
+| `POST /api/v1/sync/reconcile` | 유휴(Idle) 시점 모바일 캐시 목록과 서버 보유 목록 상호 대조 및 정합성 병합 | `SyncReconcileRequest` (`local_kakao_rooms`, `local_health_records`, `local_recording_hashes`, `last_*_ts`) | `SyncManifestResponse` (서버-단말 병합 완료된 최신 전송 목록 요약) |
 | `POST /api/v1/sync/batch-init` | 카톡 폴더 또는 알림 배치 전송 전 총 개수(`total_count`) 사전 등록 | `{ "service": "kakaotalk" \| "notification", "total_count": 10 }` | `{ "ok": true }` |
 | `POST /api/v1/sync/check-hashes` | 파일 중복 검사 (SHA-256 / BLAKE3) | `{ "hashes": ["hash1", "hash2"] }` | `{ "ok": true, "missing_hashes": ["hash2"] }` |
 | `POST /api/v1/sync/kakao-chats` | 카톡 대화 백업(`KakaoTalkChats.txt`) 및 폴더 순번 전송 | `multipart/form-data` (`folder_name`, `file_hash`, `modified_at`, `folder_index`, `total_folders`, `file`) | `{ "ok": true, "messages_added": 42, "overlapping_count": 15, "percent": 50, "verified_for_cleanup": true }` |
@@ -462,3 +464,144 @@ myLore Sync (스마트폰 라이프로그 동기화)
 | **📇 명함** (`BusinessCardWalletScreen`) | • 상단 우측 `➕` 버튼: 실시간 누적 명함 스캐너(`LiveCardScannerActivity`) 실행<br>• 이름, 회사명, 직책, 전화번호 검색창<br>• 보관 중인 명함 목록 카드 (회사명과 직책/직급 다른 행 분리 렌더링) |
 | **📊 상태** (`StatusDashboardContent`) | • 3대 동기화 조건 실시간 상태 카드: **1. 서버 Wi-Fi 연결 여부 (미연결 시 탭하여 서버 Wi-Fi 원클릭 연결)**, **2. 배터리 충전 중 여부**, **3. myLore 서버 연결 여부**<br>• 서버가 켜져있음에도 오프라인으로 감지될 경우, 상태 카드 내 **[오프라인 (클릭하여 QR 재연결)]**을 탭하여 PC 화면의 QR 코드를 스캔함으로써 즉시 재연결 및 IP/포트/토큰/서버 Wi-Fi 자동 갱신 지원<br>• `🔄 수동 동기화` 및 `📷 실시간 누적 스캔` 바로가기 버튼<br>• 실시간 라이프로그 전송 로그 터미널 뷰어 |
 | **⚙️ 설정** (`SettingsScreen`) | • **9대 시스템 권한 실시간 상태 배지 (`[허용됨]` / `[미허용]`) 및 항목별 `[열기]` 버튼**: 알림 접근, 앱 사용정보, 모든 파일 접근, 연락처, 문자, 통화 기록, 위치, 카메라, 배터리 최적화 예외<br>• myLore Sync 전체 앱 상세 설정 원클릭 버튼<br>• **서버 소속 Wi-Fi (NAT)**: 수동 SSID 목록 관리 전면 제거 완료, QR 페어링으로 수신된 서버 소속 Wi-Fi(SSID 및 비밀번호) 정보 표시 및 원클릭 Wi-Fi 연결 지원<br>• PC IP / 포트 / 토큰 정보 및 PC 연동 해제(Unpair) 기능 |
+
+---
+
+## 13. ⚡ 초고속 목록 로딩(선 캐시 표시 · 후 지연 업데이트) 및 유휴 시점 서버-단말 목록 정합성(Reconciliation) 프로토콜
+
+### 13.1 문제 배경 및 해결 전략 (Fast Load + Delayed Delta Update)
+
+1. **기존 재조회 지연 원인**:
+   - 화면을 열 때마다 카톡(`KakaoTalkChats.txt` 첫 줄부터 끝까지 전체 순회), 문자(`0L`부터 수천 건의 SMS 및 MMS Part 개별 ContentResolver 쿼리), 통화/녹음(수백 개 `.m4a` 오디오 파일 전체 SHA-256 해시 재계산), 헬스(`Download/Samsung Health` 하위 수천 개 JSON 파일 `walkTopDown` 탐색)를 매번 처음부터 다시 조회하여 심각한 로딩 지연이 발생했습니다.
+   - 특히 **카카오톡**과 **삼성 헬스**의 경우 서버 전송 완료 후 스마트폰 저장 공간 확보를 위해 원본 내보내기 폴더가 삭제(`Sync & Clean`)되므로, 파일 시스템만 스캔하면 과거에 공유했던 대화방 및 헬스 전송 이력이 화면에서 사라지는 문제가 있었습니다.
+
+2. **해결 아키텍처 — 선(先) 로컬 캐시 즉시 렌더링 (`0ms`) + 후(後) 증분 지연 업데이트 (`Delayed Delta Update`)**:
+   - **문자(`sms_cache`), 통화(`call_log_cache`), 알림(`notifications`), 녹음(`recording_cache`)**:
+     - 기존 데이터는 변하지 않고 **`기존 내용 + 신규 추가 내용(Append-Only)`** 구조이므로, 화면 진입 즉시 로컬 Room DB(`SyncCacheDao`)에 저장된 기존 목록을 **0ms(대기 없이 즉시)** 화면에 렌더링합니다.
+     - 동시에 백그라운드에서 **`max(cached_ts)` 이후에 새로 추가된 레코드만 증분 조회**하여 리스트에 지연 반영(Stale-While-Revalidate)합니다.
+     - 녹음 파일(`recording_cache`)은 `(filePath, fileSize, lastModified)`가 캐시와 일치하면 `SHA-256` 해시 계산을 완전히 생략하고 신규 녹음 파일만 해시를 계산합니다.
+   - **카카오톡(`kakao_room_cache`) & 삼성 헬스(`health_sync_cache`) — 전송 후 원본 삭제 대응**:
+     - 전송 완료 후 기기에서 내보내기 폴더가 삭제되더라도(`isOnDevice = false`), 로컬 캐시 DB에 **"전송된 가장 최신 파일의 종류(카톡: 대화방명 또는 대화 상대 / 헬스: 최신 운동·데이터 종류)"**와 **"마지막 대화/데이터 시각(`lastMessageTime` / `lastDataTime`)"**, **"PC에 공유된 마지막 순간(`lastSharedTime`)"**을 영구 유지합니다.
+     - 또한 카톡 텍스트 파일(`KakaoTalkChats.txt`) 스캔 시 파일 전체를 읽지 않고 `RandomAccessFile.seek(length - 16384)`로 **파일 끝 16KB만 O(1) 속도로 읽어들여** 마지막 대화 내용과 실제 마지막 대화 시각(`YYYY년 M월 D일 오전/오후 H:mm`)을 추출합니다.
+
+---
+
+### 13.2 `myLore Sync` 앱이 유지하는 로컬 캐시 테이블 명세 (`AppDatabase` v3)
+
+| 테이블명 (`Entity`) | Primary Key | 유지하는 핵심 정보 필드 | 용도 및 특징 |
+| :--- | :--- | :--- | :--- |
+| **`kakao_room_cache`**<br>(`KakaoRoomCacheEntity`) | `roomName` (대화방명/상대) | `folderName`, `lastMessage` (마지막 대화), `lastMessageTime` (**마지막 대화 시각**), `lastSharedTime` (**PC 공유 시각**), `totalBytes`, `textBytes`, `mediaBytes`, `mediaCount`, `syncedBytes`, `percent`, `isOnDevice` | 내보내기 폴더가 전송 후 삭제(`isOnDevice = false`)되어도 **대화방명(상대)**과 **마지막 대화 시각**을 유지하여 즉시 표시 |
+| **`health_sync_cache`**<br>(`HealthSyncCacheEntity`) | `folderName` (헬스 백업 폴더명) | `latestRecordType` (**전송된 최신 파일/운동 종류**), `lastDataTime` (**마지막 데이터/운동 시각**), `lastSharedTime` (PC 공유 시각), `csvCount`, `jsonCount`, `totalSizeKb`, `isSynced`, `isOnDevice` | 헬스 폴더 전송 후 기기에서 삭제(`isOnDevice = false`)되어도 **최신 파일 종류**와 **마지막 데이터 시각**을 유지 |
+| **`sms_cache`**<br>(`SmsCacheEntity`) | `id` (SMS / MMS+10억 / RCS+20억) | `address` (상대 번호), `body` (본문), `ts` (수발신 시각), `type` (`inbox`/`sent`), `isSynced` | 최초 1회 스캔 후 `ts > max(ts)`인 신규 문자만 증분 조회하여 즉시 표시 |
+| **`call_log_cache`**<br>(`CallLogCacheEntity`) | `id` (CallLog ID) | `number`, `name`, `callType`, `durationSec`, `ts` (통화 시각), `isSynced` | 최초 1회 스캔 후 `ts > max(ts)`인 신규 통화만 증분 조회하여 즉시 표시 |
+| **`recording_cache`**<br>(`RecordingCacheEntity`) | `filePath` (녹음 파일 절대경로) | `fileName`, `parentFolderName`, `fileSize`, `lastModified`, `fileHash` (**SHA-256 캐시**), `phoneNumber`, `contactName`, `recordedAt`, `isSynced` | `fileSize`와 `lastModified`가 동일하면 SHA-256 재계산을 생략하여 조회 시간을 수 초에서 `10ms` 미만으로 단축 |
+| **`notifications`**<br>(`NotificationEntity`) | `id` (Auto Increment) | `packageName`, `title`, `text`, `subText`, `postedAt`, `isSynced` | 실시간 알림 리스너가 적재한 로컬 DB를 즉시 Flow로 렌더링 |
+
+---
+
+### 13.3 유휴 시점(Idle) 서버-단말 간 전송 목록 상호 동기화 프로토콜 (`Reconciliation Protocol`)
+
+모든 대기 데이터 전송을 마치고 **여유가 있을 때(Idle 시점)** 또는 앱 재설치·다중 기기 연동 시, 모바일 `myLore Sync` 앱과 PC `myLore` 서버가 서로 보유한 전송 목록의 싱크(정합성)를 맞추기 위한 양방향 프로토콜입니다.
+
+#### 1) 프로토콜 시퀀스 다이어그램
+```mermaid
+sequenceDiagram
+    participant App as 📱 Mobile myLore Sync (SyncCacheDao)
+    participant Svc as ⚙️ RealtimeSyncForegroundService
+    participant PC as 💻 PC myLore Server
+
+    Note over App: 1. 사용자 화면 진입 (카톡/문자/통화/알림/녹음/헬스)
+    App->>App: Step A: 로컬 Room 캐시(SyncCacheDao) 즉시 렌더링 (0ms, 기존 목록 + 삭제된 카톡/헬스 이력 표시)
+    App->>App: Step B: 백그라운드에서 max(ts) 이후 추가된 신규 항목만 지연 스캔(Delta Update) 후 UI 자동 갱신
+
+    Note over Svc,PC: 2. 실시간 전송 루프 완료 후 유휴(Idle) 상태 진입
+    Svc->>PC: POST /api/v1/sync/reconcile (또는 GET /api/v1/sync/manifest)<br/>{ local_kakao_rooms, local_health_records, local_recording_hashes, last_*_ts }
+    PC->>PC: 서버 보관 중인 mobile/{kakao,health,calls,sms,notifications} 메타데이터와 대조·병합
+    PC-->>Svc: 200 OK (SyncManifestResponse)<br/>{ kakao_rooms, health_records, synced_recording_hashes, synced_sms_ids, synced_call_ids, synced_noti_ids, last_*_ts }
+
+    Note over Svc,App: 3. 로컬 캐시 정합성 갱신
+    Svc->>App: • kakao_room_cache 업데이트 (대화방명, 마지막 대화 시각, 공유 시각 동기화)<br/>• health_sync_cache 업데이트 (최신 파일 종류, 마지막 데이터 시각 동기화)<br/>• recording_cache / sms_cache / call_log_cache / notifications 전송 완료(isSynced) 마킹
+```
+
+#### 2) 요청 명세: `POST /api/v1/sync/reconcile` (`SyncReconcileRequest`)
+모바일 앱이 모든 실시간 전송을 마친 유휴 시점에 현재 단말이 알고 있는 요약 목록을 서버로 전달하며, 단순 조회만 필요할 때는 `GET /api/v1/sync/manifest`를 호출할 수 있습니다.
+
+```json
+{
+  "last_kakao_ts": 1761870000000,
+  "last_sms_ts": 1761865000000,
+  "last_call_ts": 1761860000000,
+  "last_noti_ts": 1761869000000,
+  "last_recording_ts": 1761855000000,
+  "last_health_ts": 1761800000000,
+  "local_kakao_rooms": [
+    {
+      "room_name": "홍길동",
+      "folder_name": "KakaoTalk_Chats_2026-10-30_21.15.00",
+      "last_message": "2026년 10월 30일 오후 9:12, 홍길동 : 내일 뵙겠습니다.",
+      "last_message_ts": 1761826320000,
+      "last_shared_ts": 1761870000000,
+      "total_bytes": 15420000,
+      "synced_bytes": 15420000
+    }
+  ],
+  "local_health_records": [
+    {
+      "folder_name": "samsunghealth_iseohyun_20261030120000",
+      "latest_record_type": "운동 세션 & 워치 GPS 경로",
+      "last_data_ts": 1761800000000,
+      "last_shared_ts": 1761870000000,
+      "csv_count": 24,
+      "json_count": 310,
+      "total_size_kb": 48200
+    }
+  ],
+  "local_recording_hashes": [
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  ]
+}
+```
+
+#### 3) 응답 명세: `GET /api/v1/sync/manifest` 및 `POST /api/v1/sync/reconcile` (`SyncManifestResponse`)
+PC 서버는 `mobile/kakao/*.md`의 프론트매터(또는 DB)에 기록된 대화방별 마지막 대화 시각과 `mobile/health/`의 최신 헬스 기록, 그리고 이미 수신 완료한 녹음 해시 및 문자/통화/알림 동기화 상태를 반환합니다.
+
+```json
+{
+  "ok": true,
+  "last_kakao_ts": 1761870000000,
+  "last_sms_ts": 1761865000000,
+  "last_call_ts": 1761860000000,
+  "last_noti_ts": 1761869000000,
+  "last_recording_ts": 1761855000000,
+  "last_health_ts": 1761800000000,
+  "kakao_rooms": [
+    {
+      "room_name": "홍길동",
+      "folder_name": "KakaoTalk_Chats_2026-10-30_21.15.00",
+      "last_message": "2026년 10월 30일 오후 9:12, 홍길동 : 내일 뵙겠습니다.",
+      "last_message_ts": 1761826320000,
+      "last_shared_ts": 1761870000000,
+      "total_bytes": 15420000,
+      "synced_bytes": 15420000
+    }
+  ],
+  "health_records": [
+    {
+      "folder_name": "samsunghealth_iseohyun_20261030120000",
+      "latest_record_type": "운동 세션 & 워치 GPS 경로",
+      "last_data_ts": 1761800000000,
+      "last_shared_ts": 1761870000000,
+      "csv_count": 24,
+      "json_count": 310,
+      "total_size_kb": 48200
+    }
+  ],
+  "synced_recording_hashes": [
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  ],
+  "synced_sms_ids": [],
+  "synced_call_ids": [],
+  "synced_noti_ids": []
+}
+```
+

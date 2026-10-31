@@ -150,6 +150,7 @@ fun DashboardScreen(
             }
             DrawerItem.RECORDINGS -> {
                 RecordingsListScreen(
+                    appPreferences = appPreferences,
                     onOpenDrawer = { scope.launch { drawerState.open() } }
                 )
             }

@@ -19,6 +19,17 @@ interface MyLoreApiService {
         @Body request: SyncWatermarksRequest
     ): Response<StatusResponse>
 
+    @GET("/api/v1/sync/manifest")
+    suspend fun getSyncManifest(
+        @Header("X-MyLore-Token") token: String
+    ): Response<SyncManifestResponse>
+
+    @POST("/api/v1/sync/reconcile")
+    suspend fun reconcileSyncLists(
+        @Header("X-MyLore-Token") token: String,
+        @Body request: SyncReconcileRequest
+    ): Response<SyncManifestResponse>
+
     @POST("/api/v1/sync/batch-init")
     suspend fun batchInit(
         @Header("X-MyLore-Token") token: String,
