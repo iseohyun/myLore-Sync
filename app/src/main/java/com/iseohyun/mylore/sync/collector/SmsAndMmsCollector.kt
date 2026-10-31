@@ -24,24 +24,28 @@ class SmsAndMmsCollector(private val context: Context) {
      */
     suspend fun refreshSmsCache(db: AppDatabase, lastSmsWatermarkTs: Long) {
         val dao = db.syncCacheDao()
+        val verifiedNow = System.currentTimeMillis()
         val maxCachedTs = dao.getMaxSmsTs() ?: 0L
         val newItems = collectSmsSince(maxCachedTs)
         if (newItems.isNotEmpty()) {
             val entities = newItems.map { item ->
+                val synced = lastSmsWatermarkTs > 0L && item.ts <= lastSmsWatermarkTs
                 SmsCacheEntity(
                     id = item.id,
                     address = item.address,
                     body = item.body,
                     ts = item.ts,
                     type = item.type,
-                    isSynced = lastSmsWatermarkTs > 0L && item.ts <= lastSmsWatermarkTs
+                    isSynced = synced,
+                    syncedAt = if (synced) verifiedNow else 0L
                 )
             }
             dao.insertSmsList(entities)
         }
         if (lastSmsWatermarkTs > 0L) {
-            dao.markSmsSyncedUpTo(lastSmsWatermarkTs)
+            dao.markSmsSyncedUpTo(lastSmsWatermarkTs, verifiedNow)
         }
+        dao.backfillMissingSmsSyncedAt(verifiedNow)
     }
 
     /**

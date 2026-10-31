@@ -1,863 +1,213 @@
-# myLore Sync (Mobile Agent) 연동 및 QR 페어링 기술 명세서
+# myLore Sync (Mobile Agent) 총괄 시스템 아키텍처 명세서 (`MYLORE_SYNC_SPEC.md`)
 
-> **문서 목적**: 안드로이드 동반 앱 (`myLore Sync`)과 PC 데스크톱 앱 (`myLore`) 간의 **QR 코드 자동 페어링 프로세스**, **3대 조건 기반 실시간·증분(Delta) 동기화 아키텍처**, **6대 모바일 라이프로그(`mobile/kakao`, `sms`, `calls`, `contacts`, `notifications`, `usage`) `.md` 스크립트 아카이빙 규격**, **통화 녹음 Gemini STT 변환 파이프라인**, 그리고 **단계별 개발 마일스톤(Phase 1~5)**을 정의하는 종합 기술 사양서입니다.  
+> **문서 목적**: 안드로이드 동반 앱 (`myLore Sync`)의 **프로젝트 기본 규격**, **전체 아키텍처 및 패키지/폴더 구조**, **도메인별 로컬 수집기(Collector) 설계**, **로컬 Room DB 캐시(`AppDatabase` v5) 스키마 및 비파괴 마이그레이션**, **안드로이드 필수 권한 및 OS 제약 해결 요구사항**, 그리고 **배포 가이드 및 개발 마일스톤**을 정의하는 총괄 기술 사양서입니다.  
+> **세부 분리 명세서**:
+> - 📱 **모바일 UI/UX 및 10대 화면(Sticky Header 표) 상세 명세**: [`MYLORE_SYNC_UI_SPEC.md`](./MYLORE_SYNC_UI_SPEC.md)
+> - 🔄 **QR 페어링 및 PC-모바일 통신/동기화 프로토콜 명세**: [`MYLORE_SYNC_COMM_SPEC.md`](./MYLORE_SYNC_COMM_SPEC.md)  
 > **문서 위치**: `C:/git/myLoreSync/MYLORE_SYNC_SPEC.md`  
-> **최종 수정일**: 2026-10-30
+> **최종 수정일**: 2026-11-01
 
 ---
 
-## 1. 프로젝트 기본 규격
+## 1. 프로젝트 기본 규격 및 문서 구성
 
+### 1.1 기본 규격
 - **앱 이름**: myLore Sync
 - **패키지명**: `com.iseohyun.mylore.sync`
-- **최소 SDK (minSdk)**: 24 (Android 7.0)
-- **타겟 SDK (targetSdk / compileSdk)**: 37 (Android 15+)
+- **최소 SDK (`minSdk`)**: 24 (Android 7.0)
+- **타겟 SDK (`targetSdk` / `compileSdk`)**: 37 (Android 15+)
 - **UI 프레임워크**: Jetpack Compose + Material 3
 - **핵심 기술 스택**:
-  - **Local Storage**: Room DB (미전송 알림/이벤트 큐, 카톡 대화방별 오프셋 캐시), DataStore Preferences (연결 설정 및 증분 타임스탬프 워터마크 캐시)
-  - **Networking**: Retrofit2 + OkHttp3 + Gson (REST API & Multi-part)
+  - **Local Storage**: Room DB (`AppDatabase` v5 — 미전송 알림 큐, 명함 지갑, 7대 동기화 로컬 캐시), DataStore Preferences (`AppPreferences` — 연결 설정, 동적 스캔 폴더 목록, 워터마크 캐시)
+  - **Networking**: Retrofit2 + OkHttp3 + Gson (REST API & Multi-part 업로드)
   - **Background Engine**: Foreground Service (`dataSync`), BroadcastReceiver, ContentObserver
-  - **Camera & Barcode**: CameraX + ZXing (QR 코드 페어링 & QuickCam)
+  - **Camera & OCR**: CameraX + ZXing (QR 코드 페어링) + ML Kit Text Recognition & Google Document Scanner (실시간 누적 명함 스캐너)
+
+### 1.2 명세서 3분할 구조
+| 문서 파일명 | 역할 및 포함 범위 |
+| :--- | :--- |
+| **[`MYLORE_SYNC_SPEC.md`](./MYLORE_SYNC_SPEC.md)**<br>*(본 문서)* | 프로젝트 기본 규격, PC 아카이브(`mobile/`) 및 안드로이드 패키지 구조, 8대 로컬 수집기(Collector) 동작 원리, Room DB(`AppDatabase` v5) 스키마, 안드로이드 권한/OS 제약 해결, 배포 및 마일스톤 |
+| **[`MYLORE_SYNC_UI_SPEC.md`](./MYLORE_SYNC_UI_SPEC.md)** | 고정 상단바 및 좌측 오버레이 드로어(10대 탭), Sticky Header 표(Table) 공통 규칙, 전송시기 3대 판정 규칙, 카테고리별 표 컬럼 상세 규격(카톡/문자/통화/알림/음성녹음/사진/헬스/명함/상태/설정), `0ms` 선 캐시 렌더링 UX |
+| **[`MYLORE_SYNC_COMM_SPEC.md`](./MYLORE_SYNC_COMM_SPEC.md)** | QR 페어링 JSON Schema 및 `myloresync://pair` 딥링크, 방식 A + 폴링 재시도 파이프라인, 다중 기기 헤더, v2.0 통합 동기화 프로토콜(2대 조건, `session-plan`, Oldest-First, 통화+녹음 결합, 서버 Background Check & `client_ack`), REST API 명세 및 PC 서버 내부 동작 |
 
 ---
 
-## 2. QR 코드 기반 자동 페어링 (QR Pairing Process)
+## 2. 아카이브 폴더 구조(`mobile/`) 및 안드로이드 패키지 구조
 
-컴퓨터에 익숙하지 않은 사용자도 IP 주소나 포트, 복잡한 인증 토큰을 직접 입력할 필요 없이 **카메라로 PC 화면의 QR 코드를 스캔하기만 하면 1초 만에 연동이 완료**되는 간편 페어링 프로세스입니다.
-
-### 2.1 QR 코드 페어링 데이터 포맷 (JSON Schema)
-
-PC `myLore` 앱은 **별도의 체크박스 없이 항상** 관리자 권한(UAC) 불필요 명령인 `netsh wlan show interfaces`(현재 연결된 SSID 탐지) 및 `netsh wlan show profile name="<SSID>" key=clear` 명령을 통해 현재 연결된 Wi-Fi의 SSID, 비밀번호(`Key Content`), 인증 방식(`WPA2`/`WPA3`/`OPEN` — WPA2/WPA3 혼합 공유기는 최대 호환성을 위해 `"WPA2"` 우선)을 즉시 읽어와, `라이프로그 수집 대쉬보드(F8) > 모바일 기기 QR 페어링` 화면에서 아래의 구조를 가지는 **JSON 데이터**(또는 `myloresync://pair?data=<Base64_JSON>` 딥링크 URI)를 QR 코드로 화면에 렌더링합니다:
-
-```json
-{
-  "v": 1,
-  "pc_name": "MYLORE-DESKTOP",
-  "ips": [
-    "192.168.0.15",
-    "10.0.0.5"
-  ],
-  "port": 18443,
-  "token": "mylore_sec_a8f9c1d2e3f4567890abcdef12345678",
-  "ssid": "seohyun5G",
-  "wifi_pw": "mypassword1234",
-  "wifi_auth": "WPA2",
-  "ssids": [
-    "seohyun5G"
-  ],
-  "created_at": 1761650000000
-}
-```
-
-#### 필드 설명:
-| 필드명 | 타입 | 설명 |
-| :--- | :--- | :--- |
-| `v` | Integer | 페어링 프로토콜 버전 (기본값: `1`) |
-| `pc_name` | String | PC 서버 식별용 이름 |
-| `ips` | Array<String> | PC의 로컬 네트워크 IP 목록 (이중 랜카드/Wi-Fi 대응) |
-| `port` | Integer | PC myLore HTTP 서버 포트 (기본값: `18443`) |
-| `token` | String | 양방향 REST API 인증용 고유 보안 토큰 (`X-MyLore-Token`) |
-| `ssid` | String | PC 서버가 현재 연결된 NAT 공유기 Wi-Fi 네트워크 식별자 (`netsh wlan show interfaces`로 자동 추출) |
-| `wifi_pw` | String | PC 서버 소속 Wi-Fi 네트워크 비밀번호 (`netsh wlan show profile ... key=clear`의 `Key Content` 자동 추출) |
-| `wifi_auth` | String | Wi-Fi 인증 방식 (`WPA2`, `WPA3`, `OPEN`, 기본값: `"WPA2"`. WPA2/WPA3 혼합 공유기는 `"WPA2"`로 정규화) |
-| `ssids` | Array<String> | 하위 호환용 허용 SSID 배열 (`ssid`가 0번 인덱스에 위치) |
-| `created_at` | Long | QR 코드 생성 타임스탬프 (ms) |
-
-> **[핵심] 방식 A (`Settings.ACTION_WIFI_ADD_NETWORKS`) + 폴링 재시도 결합 파이프라인**:
-> 기존처럼 사설 IP(`192.168.x.x`)로 서버 핸드셰이크를 먼저 시도하고 성공했을 때만 `WifiConnector`를 호출하면, 다른 네트워크(모바일 데이터 LTE/5G 또는 다른 공유기)에서 QR을 찍었을 때 사설 IP 라우팅이 불가능해 Wi-Fi 연결 시도조차 하지 않고 실패합니다. 또한 단순 `WifiNetworkSpecifier`만 사용하면 앱 종료 시 Wi-Fi 연결이 해제될 수 있습니다.
-> 따라서 `myLore Sync` 앱은 아래 **4단계 원스톱 파이프라인 (`방식 A + 폴링 재시도 결합`)**으로 동작하여 어떤 네트워크 상태에서든 원스톱 연결과 영구 Wi-Fi 등록을 보장합니다:
-> 1. **Step 1 — QR 페어링 정보 선(先) 저장 (`AppPreferences.savePairingInfo`)**: 서버 핸드셰이크 성공 여부와 무관하게, QR 스캔 즉시 `ips.first()`, `port`, `token`, `pc_name`, `ssid`, `wifi_pw`를 로컬 `DataStore`에 먼저 저장합니다.
-> 2. **Step 2 — 빠른 1차 핑 체크 (이미 동일 공유기에 연결된 경우 즉시 통과)**: 이미 휴대폰이 서버와 같은 공유기에 연결되어 있는 경우(2.4GHz/5GHz 대역 또는 위치 권한 미허용 `<unknown ssid>` 상태 포함)를 위해 후보 `ips`로 1회 빠른 핸드셰이크를 먼저 시도합니다. 성공하면 Wi-Fi 추가 팝업을 띄우지 않고 1초 만에 페어링을 완료합니다.
-> 3. **Step 3 — 방식 A (`Settings.ACTION_WIFI_ADD_NETWORKS` 인텐트)로 OS 정식 Wi-Fi 영구 등록**:
->    - 1차 핑이 실패하고 `ssid`가 비어 있지 않으며 현재 연결된 SSID와 다를 경우:
->    - **Android 11 (API 30, `Build.VERSION_CODES.R`) 이상**: `Intent(Settings.ACTION_WIFI_ADD_NETWORKS)`에 `Settings.EXTRA_WIFI_NETWORK_LIST`(`ArrayList<WifiNetworkSuggestion>`)를 담아 시스템 모달(**"`<SSID>` 네트워크를 저장하시겠습니까? [취소 / 저장]"**)을 호출합니다 (백그라운드 `addNetworkSuggestions` 병행). 사용자가 **[저장] 1회만 탭**하면 비밀번호 입력 없이 **OS 정식 저장 네트워크로 영구 등록 및 즉시 자동 연결**됩니다.
->    - **Android 10 (API 29) 이하 폴백**: `WifiManager.addNetworkSuggestions()` + `WifiNetworkSpecifier`(`ConnectivityManager.requestNetwork`) 및 클립보드 비밀번호 복사로 연결을 유도합니다.
-> 4. **Step 4 — 다중 후보 IP 순회 & 핸드셰이크 자동 폴링 재시도 (최대 10회, 1.5초 간격)**:
->    - 사용자가 시스템 `[저장]` 버튼을 눌러 공유기에 접속하고 DHCP IP 할당 및 라우팅 테이블이 갱신될 때까지 약 2~6초가 소요됩니다.
->    - 코루틴 폴링 루프가 1.5초 간격으로 최대 10회(약 15초) 동안 `ConnectivityManager` Wi-Fi 상태와 모든 후보 `ips`에 대해 `performHandshakeAndSave()`를 자동 재시도하며, 연결되는 즉시 페어링 확정 및 `RealtimeSyncForegroundService`를 시작합니다.
-
----
-
-### 2.2 QR 페어링 핸드셰이크 시퀀스 (Pairing Sequence)
-
-```mermaid
-sequenceDiagram
-    participant PC as 💻 PC myLore 서버
-    participant App as 📱 Mobile myLore Sync
-    participant OS as 📡 Android OS (ACTION_WIFI_ADD_NETWORKS)
-    participant DS as 💾 DataStore (로컬)
-
-    Note over PC: 1. PC 대시보드 > [모바일 기기 QR 페어링] 화면 진입
-    PC->>PC: netsh wlan show interfaces (현재 SSID 탐지)
-    PC->>PC: netsh wlan show profile name="<SSID>" key=clear (No-UAC, PW/Auth 추출)
-    PC->>PC: 별도 체크박스 없이 토큰 + 로컬 IP 목록 + Wi-Fi(SSID, PW, Auth) 포함 QR 코드 표시
-
-    Note over App: 2. 모바일 QR 스캔 (앱 내 스캐너 또는 기본 카메라 딥링크)
-    App->>PC: PC 화면의 QR 코드 카메라 스캔
-    App->>App: QR JSON 파싱 (ips, port, token, ssid, wifi_pw, wifi_auth 추출)
-    App->>DS: Step 1: 페어링 설정 및 서버 Wi-Fi 정보 선(先) 저장
-
-    Note over App,OS: 3. 1차 빠른 핑 체크 후 미연결 시 방식 A (OS Wi-Fi 영구 등록) 호출
-    alt 이미 동일 네트워크여서 1차 핸드셰이크 성공
-        App->>PC: Step 2: GET /api/v1/status & POST /api/v1/pair/confirm (즉시 완료)
-    else 모바일 데이터(LTE/5G) 또는 타 Wi-Fi 상태
-        App->>OS: Step 3: Intent(Settings.ACTION_WIFI_ADD_NETWORKS)<br/>EXTRA_WIFI_NETWORK_LIST = [WifiNetworkSuggestion(ssid, wifi_pw)]
-        OS-->>App: 사용자가 시스템 팝업 [저장] 1회 탭 ➔ OS 정식 Wi-Fi 영구 등록 & 자동 접속
-        Note over App,PC: Step 4: 다중 후보 IP 순회 핸드셰이크 폴링 재시도 (1.5초 간격 × 최대 10회)
-        loop 후보 IP 순회 및 재시도 (DHCP/라우팅 완료 대기)
-            App->>PC: GET http://{ip}:18443/api/v1/status (Header: X-MyLore-Token)
-            PC-->>App: { ok: true, status: "ok", pc_name: "MYLORE-DESKTOP", ... } (200 OK)
-            App->>PC: POST /api/v1/pair/confirm ({ device_name: "Galaxy S24", model: "SM-S921N" })
-            PC-->>App: { ok: true, registered_device_id: "dev_98765" }
-        end
-    end
-
-    Note over App: 5. 최종 연동 확정 및 실시간 동기화 엔진 가동
-    App->>DS: 성공한 IP 확정 저장 (is_paired = true)
-    App-->>PC: 대시보드에 "연결됨" 표시 & RealtimeSyncForegroundService 즉시 시작
-```
-
----
-
-## 3. 핵심 아키텍처 및 6대 카테고리 폴더 구조 (`mobile/`)
-
-PC 서버(`myLore`)는 모바일에서 수신한 모든 데이터를 아카이브(`data` 볼트, 예: `C:\Users\iseoh\OneDrive\iseohyunDocs`) 하위의 **`mobile/`** 통합 폴더 내에 **6개 영문 카테고리 폴더**로 분류하여 마크다운(`.md`) 스크립트 형태로 영구 보관 및 증분 업데이트(Append/Upsert)합니다:
+### 2.1 PC 아카이브 폴더 구조 (`mobile/`)
+PC 서버(`myLore`)는 모바일에서 수신한 모든 데이터를 아카이브 루트 하위의 **`mobile/`** 통합 폴더 내에 카테고리별로 분류하여 마크다운(`.md`) 스크립트 및 원본 미디어로 영구 보관합니다:
 
 ```text
 <Archive Root (iseohyunDocs)>/
-├── .agentSearchGuide.md             # [전역 AI 라우팅 가이드] 전체 볼트(프로젝트/일기/차량/부동산/모바일) 검색 색인 지도
-└── mobile/                          # 스마트폰 통합 아카이브 폴더 (구 _Backup 폐기)
-    ├── kakao/                       # 1. 카카오톡 대화방별 .md 스크립트 및 첨부 미디어 (media/)
-    ├── sms/                         # 2. 문자(SMS/MMS) 상대방별 수발신 .md 스크립트
-    ├── calls/                       # 3. 통화 수발신 이력 + 통화 녹음 Gemini STT 대화록 .md 스크립트 (audio/)
-    ├── contacts/                    # 4. 연락처/주소록 통합 및 인물별 .md 문서
-    ├── notifications/               # 5. 앱 푸시 알림/알람 월별 .md 타임라인
-    └── usage/                       # 6. 휴대폰 앱별 사용시간(Screen Time / Digital Wellbeing) .md 리포트
+├── .agentSearchGuide.md             # 전역 AI 라우팅 가이드
+└── mobile/                          # 스마트폰 통합 아카이브 폴더
+    ├── kakao/                       # 1. 카카오톡 대화방별 .md 스크립트 및 원본 내보내기 폴더/미디어
+    ├── sms/                         # 2. 문자(SMS/MMS/RCS) 상대방별 수발신 .md 스크립트
+    ├── calls/                       # 3. 통화 수발신 이력 + 통화 녹음(Call/TPhoneCallRecords) 오디오(audio/) 및 Gemini STT 대화록 .md
+    ├── recordings/                  # 4. 순수 일반 음성녹음(Voice Recorder/워치 음성메모) 오디오 및 STT .md
+    ├── photos/ (또는 Media Inbox)    # 5. 스마트폰 5대 사진/영상 폴더(Camera, Pictures, Screen recordings, Screenshots, Videocaptures)
+    ├── health/                      # 6. 삼성 헬스 운동 기록 .md 및 워치 GPS .gpx 파일 (gpx/)
+    ├── contacts/                    # 7. 연락처/주소록 통합 및 인물별 .md 문서
+    ├── notifications/               # 8. 앱 푸시 알림/알람 월별 .md 타임라인
+    └── usage/                       # 9. 휴대폰 앱별 사용시간(Screen Time) 월별 .md 리포트
 ```
 
-### 모바일 앱(`myLore Sync`) 패키지 구조
+### 2.2 모바일 앱(`myLore Sync`) 패키지 구조
 ```text
 com.iseohyun.mylore.sync/
 ├── data/
 │   ├── local/
-│   │   ├── AppDatabase.kt            # Room Database
-│   │   ├── dao/                      # NotificationDao, SyncLogDao, KakaoRoomOffsetDao
-│   │   └── entity/                   # NotificationEntity, SyncLogEntity, KakaoRoomOffsetEntity
+│   │   ├── AppDatabase.kt                 # Room Database (version = 5, 비파괴 마이그레이션 MIGRATION_3_4, MIGRATION_4_5)
+│   │   ├── dao/
+│   │   │   ├── NotificationDao.kt         # 실시간 알림 큐 및 전송 상태 관리
+│   │   │   ├── SyncLogDao.kt              # 실시간 전송 로그 기록
+│   │   │   ├── KakaoRoomOffsetDao.kt      # 카톡 대화방별 바이트 오프셋
+│   │   │   ├── BusinessCardDao.kt         # 명함 지갑 영구 저장소
+│   │   │   └── SyncCacheDao.kt            # 7대 동기화 화면 초고속 렌더링용 로컬 캐시 DAO
+│   │   └── entity/
+│   │       ├── NotificationEntity.kt      # pending_notifications 테이블 (syncedAt 포함)
+│   │       ├── BusinessCardEntity.kt      # business_cards 테이블
+│   │       └── SyncCacheEntities.kt       # KakaoRoom, HealthSync, Sms, CallLog, Recording, PhotoMedia 캐시 엔티티
 │   ├── prefs/
-│   │   └── AppPreferences.kt         # DataStore (IP, Port, Token, SSIDs, last_*_ts 워터마크)
+│   │   └── AppPreferences.kt              # DataStore (페어링 설정, 워터마크, 통화녹음 활성 폴더 목록, 사진 활성 폴더 목록)
 │   └── remote/
-│       ├── MyLoreApiService.kt       # Retrofit2 Interface
-│       ├── ApiClient.kt              # OkHttp Client (Interceptor, Timeout)
-│       └── dto/                      # StatusResponse, Sync*Request/Response
+│       ├── MyLoreApiService.kt            # Retrofit2 REST API 인터페이스
+│       ├── ApiClient.kt                   # OkHttp Client & 타임아웃/인증 헤더 인터셉터
+│       └── dto/SyncDtos.kt                # 요청/응답 DTO 정의
 ├── collector/
-│   ├── MyloreNotificationListener.kt # 1. 상단바 알림 (카톡/금융/앱 알림) 실시간 캡처
-│   ├── SmsAndMmsCollector.kt         # 2. SMS/MMS 증분 수집 (ts > last_sms_ts)
-│   ├── CallLogCollector.kt           # 3. 통화기록 증분 수집 (ts > last_call_ts)
-│   ├── CallRecordingCollector.kt     # 4. 통화 녹음 음성파일(.m4a/.amr) 증분 스캔 (Recordings/Call)
-│   ├── ContactsCollector.kt          # 5. 연락처/주소록 증분 수집 (updated_ts > last_contact_ts)
-│   ├── AppUsageCollector.kt          # 6. 휴대폰 앱 사용시간 수집 (UsageStatsManager, ts > last_usage_ts)
-│   └── KakaoChatFolderWatcher.kt     # 7. Documents/KakaoTalk/Chats 대화방별 증분 슬라이싱(Delta Slicing)
+│   ├── MyloreNotificationListener.kt      # 1. 상단바 알림 실시간 캡처 (금융/카톡/RCS/일반 앱)
+│   ├── SmsAndMmsCollector.kt              # 2. SMS + MMS(Part/Addr) 통합 증분 수집
+│   ├── CallLogCollector.kt                # 3. 통화 기록(수신/발신/부재중/거절) 증분 수집
+│   ├── CallRecordingCollector.kt          # 4. 동적 후보 폴더 기반 통화녹음(Call/TPhoneCallRecords) 및 음성녹음 스캔
+│   ├── PhotoMediaCollector.kt             # 5. 5대 사진/영상 폴더(Camera, Pictures, Screen recordings, Screenshots, Videocaptures) 스캔
+│   ├── SamsungHealthCollector.kt          # 6. Download/Samsung Health 내 CSV 및 워치 GPS JSON 수집
+│   ├── ContactsCollector.kt               # 7. ContactsContract 기반 연락처 증분 수집 및 번호↔이름 매핑
+│   ├── AppUsageCollector.kt               # 8. UsageStatsManager 기반 일자별 앱 사용시간 수집
+│   └── KakaoChatFolderWatcher.kt          # 9. Documents/KakaoTalk/Chats 대화방별 최신 폴더 선별 및 꼬리 16KB 고속 파싱
 ├── engine/
-│   ├── SyncConditionMonitor.kt       # [Wi-Fi] AND [충전 중] AND [PC 통신 가능] 3대 조건 판별
-│   └── RealtimeSyncForegroundService.kt # Foreground Service (Initial Dump + Delta Push)
+│   ├── SyncConditionMonitor.kt            # 배터리(80%/75% 히스테리시스) & 서버 연결 2대 조건 판별기
+│   ├── WifiConnector.kt                   # 방식 A(ACTION_WIFI_ADD_NETWORKS) 및 폴링 기반 자동 Wi-Fi 연결기
+│   ├── PcWakeListener.kt                  # UDP 18444 브로드캐스트(MYLORE_PC_ONLINE / MYLORE_FULL_RESYNC) 수신기
+│   └── RealtimeSyncForegroundService.kt   # 통합 동기화 Foreground Service (v2.0 프로토콜 수행)
+└── ui/
+    ├── MainActivity.kt                    # 좌측 오버레이 드로어(10대 탭) 호스트 및 상태 대시보드
+    ├── SyncTableComponents.kt             # 공통 Sticky Header 표 컴포넌트 및 전송시기 포맷터
+    ├── KakaoListScreen.kt                 # 💬 카톡 표 화면
+    ├── SmsListScreen.kt                   # ✉️ 문자 표 화면
+    ├── CallListScreen.kt                  # 📞 통화(통화녹음/T전화녹음 통합) 표 화면
+    ├── NotificationListScreen.kt          # 🔔 알림 표 화면 + 내용보기 모달
+    ├── RecordingsListScreen.kt            # 🎙️ 순수 음성녹음 표 화면
+    ├── PhotoListScreen.kt                 # 🖼️ 사진(5대 폴더) 표 화면
+    ├── HealthSyncScreen.kt                # 🏃 삼성 헬스 화면
+    ├── BusinessCardWalletScreen.kt        # 📇 명함 지갑 화면
+    ├── LiveCardScannerActivity.kt         # 실시간 누적 OCR 명함 스캐너
+    ├── QrScannerActivity.kt               # QR 페어링 스캐너
+    └── SettingsScreen.kt                  # ⚙️ 권한 배지 및 연동 설정 화면
 ```
 
 ---
 
-## 4. 증분 동기화(Delta Sync) 상세 프로토콜 (추가된 내용만 업데이트)
+## 3. 도메인별 로컬 수집기(Collector) 핵심 설계
 
-> **핵심 원칙**: 최초 동기화(`last_*_ts == 0`) 시에는 스마트폰에 저장된 **과거의 모든 이력을 오래된 순서(`ASC`)로 배치(Batch Chunk, 200~500건 단위) 수집**하여 `.md` 파일로 생성하고, 이후 동기화 시에는 **마지막 업데이트 시점(`last_*_ts`) 이후에 새로 추가·변경된 데이터만 추출하여 전송**합니다.
+### 3.1 동적 후보 폴더 탐색 기반 통화녹음 & 음성녹음 수집 (`CallRecordingCollector.kt`)
+- **하드코딩 배제 및 앱 초기화 시 동적 폴더 검증**:
+  - 기기 제조사 및 앱(삼성 기본 전화, SKT T전화, 삼성 음성녹음, 갤럭시 워치)마다 녹음 저장 경로와 대소문자(`Recordings` vs `recordings`)가 다를 수 있습니다.
+  - 따라서 후보 상대 경로 리스트(`CANDIDATE_RELATIVE_PATHS`: `Recordings/Call`, `Recordings/TPhoneCallRecords`, `recordings/TPhoneCallRecords`, `Call`, `TPhoneCallRecords`, `Recordings/Voice Recorder`, `Recordings/Sounds`, `Recordings` 등)를 상수로 관리하고, **앱 시작 시 실제 단말 스토리지에 존재하는 폴더만 검증하여 `AppPreferences.activeRecordingDirs`에 기본 조회 폴더로 등록**합니다.
+- **통화녹음 vs 순수 음성녹음 자동 분류 (`isCallRecordingEntry`)**:
+  - 상위 폴더가 `Call`, `TPhoneCallRecords`이거나 파일명이 `#이름_번호_일시`(T전화), `통화 녹음_` 패턴이거나 전화번호가 파싱된 파일은 **통화녹음**으로 분류하여 **통화(`CallListScreen`) 탭 및 통화 이벤트 동기화**로 귀속시킵니다.
+  - 그 외 `Voice Recorder`, `Sounds/Watch` 등의 녹음 파일만 **음성녹음(`RecordingsListScreen`) 탭**에 표시합니다.
 
-### 4.1 카카오톡 내보내기(`Documents/KakaoTalk/Chats`) 스마트 증분 슬라이싱 & 자동 정리
-카카오톡 `[대화 내용 내보내기]`를 실행할 때마다 `KakaoTalk_Chats_YYYY-MM-DD_hh.mm.ss_...` 폴더가 새로 생성되며, 내부의 `KakaoTalkChats.txt`에는 처음부터 현재까지의 모든 대화가 누적되어 들어갑니다. 용량 폭발과 중복 파싱을 막기 위해 다음 **4단계 증분 알고리즘**을 적용합니다:
+### 3.2 5대 미디어 폴더 기반 사진·영상 수집 (`PhotoMediaCollector.kt`)
+- **기본 접근 5대 폴더 카테고리 (`PhotoFolderCategory`)**:
+  1. **`Camera`**: `DCIM/Camera`, `Camera`
+  2. **`Pictures`**: `Pictures` (하위 `Screenshots`, `Screen recordings`, `Videocaptures`는 각 전용 카테고리로 분리하여 중복 집계 방지)
+  3. **`Screen recordings`**: `DCIM/Screen recordings`, `DCIM/Screen Recordings`, `Movies/Screen recordings`, `Pictures/Screen recordings`
+  4. **`Screenshots`**: `DCIM/Screenshots`, `Pictures/Screenshots`, `Screenshots`
+  5. **`Videocaptures`**: `DCIM/Videocaptures`, `DCIM/VideoCaptures`, `Movies/Videocaptures`, `Pictures/Videocaptures`, `Videocaptures`
+- 앱 시작 시 `discoverAndRegisterDefaultDirectories()`가 실제 존재하는 폴더를 확인하여 `AppPreferences.activePhotoDirs`에 등록하고, 사진 및 동영상을 스캔하여 로컬 캐시(`photo_media_cache`)와 서버 동기화 파이프라인에 공급합니다.
 
-1. **대화방 고유 키(`room_key`) 추출 및 최신 폴더 단일 선택**:
-   - 각 하위 폴더 내 `KakaoTalkChats.txt`의 **1번째 줄**(`{방이름} 님과 카카오톡 대화`)에서 `room_name`을 추출합니다.
-   - 동일한 `room_name`을 가진 내보내기 폴더가 여러 개 존재할 경우, 가장 마지막에 내보낸 폴더(`modifiedAt`이 가장 큰 폴더)에 이전 대화가 100% 포함되어 있으므로 **가장 최신 폴더 1개만 동기화 대상**으로 삼고 이전 중복 폴더는 건너뜁니다.
-2. **바이트 오프셋(`last_byte_offset`) + 마지막 줄 해시(`last_line_hash`) 기반 Delta Slicing**:
-   - `GET /api/v1/status` (또는 `/api/v1/sync/kakao-room-state`) 응답에는 PC 서버가 기억하는 대화방별 상태(`room_name`, `last_file_hash`, `last_byte_offset`, `last_msg_line`)가 포함됩니다.
-   - 모바일 앱은 새 `KakaoTalkChats.txt` 파일의 크기가 `last_byte_offset`보다 클 경우, 파일 전체를 읽지 않고 **`RandomAccessFile.seek(last_byte_offset)` 근처로 점프**하여 `last_msg_line` 이후에 **새로 추가된 텍스트 줄(Delta Lines)만 슬라이싱**하여 전송합니다.
-   - PC 서버는 수신한 증분 대화 줄을 파싱(`YYYY년 M월 D일 오전/오후 H:MM, 발신자 : 내용` 및 줄바꿈 연속 메시지 지원)하여 `mobile/kakao/{방이름}.md` 파일 하단에 날짜 섹션(`## 📅 YYYY-MM-DD`)별로 중복 없이 Append합니다.
-3. **첨부 미디어(사진/동영상) 해시 사전 대조 (`/api/v1/sync/check-hashes`)**:
-   - 내보내기 폴더 내의 `.jpg`, `.png`, `.mp4` 파일들은 업로드 전 SHA-256 해시 목록을 `/api/v1/sync/check-hashes`로 먼저 조회하여, PC에 없는 **신규 미디어 파일만 업로드**(`mobile/kakao/media/{방이름}/`에 저장)합니다.
-4. **스마트폰 내보내기 폴더 자동 청소 (`Sync & Clean`, 선택 옵션)**:
-   - PC 서버가 `.md` 병합 및 `synced_file_hashes` 등록을 완료하고 `{ "ok": true, "verified_for_cleanup": true }`를 반환하면, 모바일 앱은 이미 동기화가 끝난 이전 내보내기 폴더를 삭제하여 스마트폰 저장공간을 확보할 수 있습니다.
+### 3.3 MMS(장문 문자 / 첨부 미디어) 및 RCS 통합 수집 (`SmsAndMmsCollector.kt`)
+- `content://sms`뿐만 아니라 `content://mms`, `content://mms/part`, `content://mms/{id}/addr`를 함께 파싱합니다.
+- MMS `date`는 초(Second) 단위이므로 `date * 1000L`로 밀리초 변환하며, SMS ID와의 충돌을 막기 위해 MMS ID에는 `1_000_000_000L + mms_id` 오프셋을 부여합니다.
+- 갤럭시 채팅+(RCS) 메시지는 `MyloreNotificationListener`와 2중 교차 수집하여 누락을 방지합니다.
 
-### 4.2 통화이력(`CallLog`) + 통화 녹음 음성파일(`Call Recordings`) Gemini STT 스크립트화
-1. **통화 수·발신 이력 (`POST /api/v1/sync/call-logs`)**:
-   - `CallLog.Calls.DATE > last_call_ts` 조건으로 과거 전체 통화이력(이후 증분)을 조회하여 300건 단위로 전송합니다.
-   - PC 서버는 이를 `mobile/calls/{상대방이름_또는_번호}.md` 및 `mobile/calls/_통화이력_타임라인.md`에 스크립트 형태로 기록합니다.
-2. **통화 녹음 음성 파일 수집 및 Gemini STT 대화록 생성 (`POST /api/v1/sync/call-recordings`)**:
-   - 모바일 앱(`CallRecordingCollector`)은 안드로이드 통화 녹음 경로(`/sdcard/Recordings/Call/` 또는 `/sdcard/Call/`)에서 `.m4a`, `.amr`, `.mp3`, `.wav` 파일을 스캔하고, `/api/v1/sync/check-hashes`로 아직 전송되지 않은 녹음 파일만 PC로 업로드합니다.
-   - PC 서버는 원본 오디오를 `mobile/calls/audio/{YYYY}/`에 저장하고, 설정된 **Gemini API (`gemini-2.5-flash`)**에 오디오를 전달하여 **[통화 핵심 요약 + 화자 분리 대화 스크립트]**를 생성한 뒤 `mobile/calls/{상대방이름_또는_번호}.md`에 자동으로 병합합니다.
+### 3.4 카카오톡 내보내기 폴더 꼬리(Tail 16KB) 고속 파싱 (`KakaoChatFolderWatcher.kt`)
+- `Documents/KakaoTalk/Chats` 하위 폴더 중 동일 대화방(`room_name`)은 가장 최신 내보내기 폴더 1개만 선별합니다.
+- 수십 MB에 달하는 `KakaoTalkChats.txt` 전체를 매번 읽지 않고, 첫 줄에서 대화방 이름을 추출한 뒤 `RandomAccessFile.seek(length - 16384)`로 **파일 끝 16KB만 O(1) 속도로 읽어** 마지막 대화 내용과 마지막 대화 일시(`lastMessageTime`)를 즉시 추출합니다.
 
-### 4.3 문자(`SMS/MMS`), 연락처(`Contacts`), 알람(`Notifications`), 휴대폰 사용량(`App Usage`) 증분 수집
-- **문자 (`POST /api/v1/sync/sms`)**: `Telephony.Sms.DATE > last_sms_ts` 조건으로 수집 ➔ `mobile/sms/{상대방이름_또는_번호}.md`에 시간순 누적 Append (금융 결제 문자는 가계부 DB에도 동시 파싱).
-- **연락처 (`POST /api/v1/sync/contacts`)**: `ContactsContract.Contacts.CONTACT_LAST_UPDATED_TIMESTAMP > last_contact_ts` (`android.permission.READ_CONTACTS`) 조건으로 추가·수정된 연락처 수집 ➔ `mobile/contacts/연락처_주소록.md`에 최신 상태로 Upsert. 또한 전화번호↔이름 매핑 테이블을 갱신하여 문자/통화 `.md` 생성 시 전화번호를 실제 이름으로 자동 치환.
-- **알람/알림 (`POST /api/v1/sync/notifications`)**: Room DB 미전송 큐(`isSynced == false`)를 전송 ➔ `mobile/notifications/{YYYY-MM}_알람내역.md`에 누적 기록.
-- **휴대폰 사용량 (`POST /api/v1/sync/app-usage`)**: 안드로이드 `UsageStatsManager` (`android.permission.PACKAGE_USAGE_STATS` 권한)를 통해 일자별 앱 포그라운드 사용 시간(`totalTimeInForeground`), 마지막 사용 시각(`lastTimeUsed`), 실행 횟수를 수집 ➔ `mobile/usage/{YYYY-MM}_휴대폰사용량.md`에 일자별 스크린타임 리포트로 누적 기록.
+### 3.5 삼성 헬스 & 갤럭시 워치 GPS 데이터 수집 (`SamsungHealthCollector.kt`)
+- `/sdcard/Download/Samsung Health/samsunghealth_{계정}_{YYYYMMDDHHMMSS}/` 폴더 중 타임스탬프가 가장 최신인 폴더를 판별하여 운동 요약 `.csv` 및 `jsons/com.samsung.shealth.exercise/.../location_data.json`(워치 GPS 경로)을 수집합니다.
 
 ---
 
-## 5. REST API 명세 요약 (Mobile ↔ PC)
+## 4. 로컬 Room DB 스키마 및 비파괴 마이그레이션 (`AppDatabase` v5)
 
-> **인증 헤더**: 모든 요청에는 `X-MyLore-Token: {token}` (또는 `Authorization: Bearer {token}`) 헤더가 포함됩니다.
+### 4.1 전체 엔티티(테이블) 명세
 
-| 메서드 & URI | 설명 | Request Body | Response |
+| 테이블명 (`Entity`) | Primary Key | 주요 컬럼 | 용도 및 특징 |
 | :--- | :--- | :--- | :--- |
-| `GET /api/v1/status` | PC 상태 및 8대 카테고리 증분 타임스탬프 조회 | None (또는 `device_id` 쿼리) | `{ "ok": true, "pc_name": "...", "force_full_sync": false, "last_kakao_ts": 0, "last_sms_ts": 0, "last_call_ts": 0, "last_noti_ts": 0, "last_recording_ts": 0, "last_health_ts": 0, "last_contact_ts": 0, "last_usage_ts": 0 }` |
-| `POST /api/v1/pair/confirm` | QR 페어링 승인 및 기기 등록 | `{ "device_name": "Galaxy S24", "model": "SM-S921N", "android_version": "15", "app_version": "1.0" }` | `{ "ok": true, "registered_device_id": "dev_..." }` |
-| `POST /api/v1/sync/watermarks` | 8대 서비스별 전송 완료 시점(워터마크) 상호 공유 및 최댓값 병합 | `{ "last_kakao_ts": 0, "last_sms_ts": 0, "last_call_ts": 0, "last_noti_ts": 0, "last_recording_ts": 0, "last_health_ts": 0, "last_contact_ts": 0, "last_usage_ts": 0 }` | `{ "ok": true, "pc_name": "...", "force_full_sync": false, "last_*_ts": ... }` |
-| `GET /api/v1/sync/manifest` | 서버가 보유한 6대 카테고리 전송 완료 목록(카톡 대화방별 마지막 대화 시각, 헬스 최신 파일 종류/시각, 녹음 해시 목록 등) 조회 | None (또는 `device_id` 쿼리) | `SyncManifestResponse` (`kakao_rooms`, `health_records`, `synced_recording_hashes`, `synced_sms_ids`, `synced_call_ids`, `synced_noti_ids`, `last_*_ts`) |
-| `POST /api/v1/sync/reconcile` | 유휴(Idle) 시점 모바일 캐시 목록과 서버 보유 목록 상호 대조 및 정합성 병합 | `SyncReconcileRequest` (`local_kakao_rooms`, `local_health_records`, `local_recording_hashes`, `last_*_ts`) | `SyncManifestResponse` (서버-단말 병합 완료된 최신 전송 목록 요약) |
-| `POST /api/v1/sync/batch-init` | 카톡 폴더 또는 알림 배치 전송 전 총 개수(`total_count`) 사전 등록 | `{ "service": "kakaotalk" \| "notification", "total_count": 10 }` | `{ "ok": true }` |
-| `POST /api/v1/sync/check-hashes` | 파일 중복 검사 (SHA-256 / BLAKE3) | `{ "hashes": ["hash1", "hash2"] }` | `{ "ok": true, "missing_hashes": ["hash2"] }` |
-| `POST /api/v1/sync/kakao-chats` | 카톡 대화 백업(`KakaoTalkChats.txt`) 및 폴더 순번 전송 | `multipart/form-data` (`folder_name`, `file_hash`, `modified_at`, `folder_index`, `total_folders`, `file`) | `{ "ok": true, "messages_added": 42, "overlapping_count": 15, "percent": 50, "verified_for_cleanup": true }` |
-| `POST /api/v1/sync/notifications` | 수집 알림 1건씩 순차 전송 (`mobile/notifications/`) | `{ "items": [{ "id": 1, "pkg": "...", "title": "...", "text": "...", "sub_text": "...", "ts": 176165... }], "current_index": 1, "total_count": 10 }` | `{ "ok": true, "ack_ids": [1], "percent": 10 }` |
-| `POST /api/v1/sync/sms` | SMS/MMS 증분 전송 (`mobile/sms/`) | `{ "items": [{ "id": 10, "address": "010...", "body": "...", "ts": 176165..., "type": "inbox" }] }` | `{ "ok": true, "ack_ids": [10], "finance_parsed": 1 }` |
-| `POST /api/v1/sync/call-logs` | 통화 기록 증분 전송 (`mobile/calls/`) | `{ "items": [{ "id": 5, "number": "010...", "name": "...", "call_type": "incoming", "duration_sec": 120, "ts": 176165... }] }` | `{ "ok": true, "ack_ids": [5], "inserted_count": 1 }` |
-| `POST /api/v1/sync/call-recordings` | 통화 녹음 음성 파일 업로드 & Gemini STT 스크립트화 (`mobile/calls/`) | `multipart/form-data` (`file_hash`, `phone_number`, `contact_name`, `recorded_at`, `file`) | `{ "ok": true, "file_hash": "...", "transcript_generated": true, "md_path": "..." }` |
-| `POST /api/v1/sync/contacts` | 연락처/주소록 증분 전송 (`mobile/contacts/`) | `{ "items": [{ "contact_id": "1", "name": "홍길동", "phones": ["010-1234-5678"], "emails": [], "organization": "...", "job_title": "...", "memo": "...", "updated_ts": 176165... }] }` | `{ "ok": true, "upserted_count": 1 }` |
-| `POST /api/v1/sync/app-usage` | 휴대폰 앱별 사용시간 전송 (`mobile/usage/`) | `{ "items": [{ "date": "2026-10-30", "pkg": "com.kakao.talk", "app_name": "카카오톡", "total_foreground_ms": 5400000, "launch_count": 32, "last_time_used": 176165... }] }` | `{ "ok": true, "recorded_count": 1 }` |
-| `POST /api/v1/sync/media` | 카톡 내보내기 미디어(원본 적재) 및 빠른 스캔 사진(QuickCam) 전송 | `multipart/form-data` (`taken_at`, `source_type`, `folder_name` (선택), `file`) | `{ "ok": true, "uuid": "...", "uri": "mylore://media/..." }` |
-| `POST /api/v1/sync/samsung-health` | 삼성 헬스 및 워치 운동/GPS 데이터 업로드 (`mobile/health/`) | `multipart/form-data` (CSV/JSON 또는 ZIP 아카이브) | `{ "ok": true, "gpx_created": true, "md_path": "..." }` |
+| **`kakao_room_cache`**<br>(`KakaoRoomCacheEntity`) | `roomName` | `folderName`, `lastMessage`, `lastMessageTime`, `lastSharedTime`, `totalBytes`, `textBytes`, `mediaBytes`, `mediaCount`, `syncedBytes`, `percent`, `isOnDevice`, `updatedAt` | 카톡 내보내기 폴더가 전송 후 삭제(`isOnDevice = false`)되어도 대화방명, 마지막 대화일시, 전송시기(`lastSharedTime`)를 영구 보존 |
+| **`sms_cache`**<br>(`SmsCacheEntity`) | `id` | `address`, `body`, `ts`, `type`, `isSynced`, `syncedAt` | 최초 스캔 후 `ts > max(ts)`인 신규 문자만 증분 조회, `syncedAt`으로 전송시기 표시 |
+| **`call_log_cache`**<br>(`CallLogCacheEntity`) | `id` | `number`, `name`, `callType`, `durationSec`, `ts`, `isSynced`, `syncedAt` | 통화 기록 증분 캐싱 및 전송완료시기(`syncedAt`) 관리 |
+| **`recording_cache`**<br>(`RecordingCacheEntity`) | `filePath` | `fileName`, `parentFolderName`, `fileSize`, `lastModified`, `fileHash`, `phoneNumber`, `contactName`, `recordedAt`, `isSynced`, `syncedAt` | `(fileSize, lastModified)` 일치 시 SHA-256 해시 재계산 생략, 통화녹음(`Call`/`TPhoneCallRecords`)과 일반 음성녹음 통합 캐싱 |
+| **`photo_media_cache`**<br>(`PhotoMediaCacheEntity`) | `filePath` | `fileName`, `folderCategory`, `parentFolderPath`, `fileSize`, `lastModified`, `takenAt`, `mimeType`, `fileHash`, `isSynced`, `syncedAt` | 5대 사진/영상 폴더 미디어 메타데이터 및 SHA-256 해시 캐싱, 전송시기(`syncedAt`) 관리 |
+| **`health_sync_cache`**<br>(`HealthSyncCacheEntity`) | `folderName` | `latestRecordType`, `lastDataTime`, `lastSharedTime`, `csvCount`, `jsonCount`, `totalSizeKb`, `isSynced`, `isOnDevice`, `updatedAt` | 삼성 헬스 전송 완료 후 원본 폴더 삭제 시에도 최신 운동 종류 및 공유 시각 보존 |
+| **`pending_notifications`**<br>(`NotificationEntity`) | `id` (Auto) | `packageName`, `title`, `text`, `subText`, `postedAt`, `isSynced`, `syncedAt` | 상단바 알림 실시간 적재, 전송시점(`syncedAt`) 및 전문 보기 데이터 제공 |
+| **`business_cards`**<br>(`BusinessCardEntity`) | `id` (Auto) | `name`, `company`, `jobTitle`, `department`, `mobile`, `phone`, `email`, `address`, `website`, `memo`, `imagePath`, `contactUri`, `createdAt` | 명함 스캐너로 촬영·인식한 명함 지갑 영구 보관 |
+| **`sync_logs`**<br>(`SyncLogEntity`) | `id` (Auto) | `timestamp`, `category`, `message`, `isError` | 상태 탭 실시간 전송 로그 뷰어용 이벤트 기록 |
+
+### 4.2 데이터 유실 방지 비파괴 마이그레이션 원칙
+- **절대 `fallbackToDestructiveMigration()`에 의존하여 사용자 데이터를 초기화하지 않습니다.**
+- 스키마 변경 시 반드시 명시적 `Migration` 객체를 등록하여 기존 보관 중인 명함(`business_cards`), 알림(`pending_notifications`), 동기화 캐시를 100% 보존합니다:
+  - **`MIGRATION_3_4`**: `sms_cache`, `call_log_cache`, `recording_cache`, `pending_notifications` 테이블에 `syncedAt INTEGER NOT NULL DEFAULT 0` 컬럼 추가.
+  - **`MIGRATION_4_5`**: `photo_media_cache` 테이블 신규 생성 (`CREATE TABLE IF NOT EXISTS photo_media_cache ...`).
 
 ---
 
-## 6. 단계별 개발 마일스톤 (Milestones)
+## 5. 안드로이드 필수 권한 및 OS 제약 해결 요구사항
 
-### 📌 Phase 1: 패키지 정제, 의존성 구축 및 로컬/네트워크 레이어 (`완료`)
-- [x] 기술 명세서 및 QR 페어링 설계 문서 작성 (`MYLORE_SYNC_SPEC.md`)
-- [x] 패키지명 변경: `com.example.myloresync` ➔ `com.iseohyun.mylore.sync`
-- [x] Dependencies 추가: Room, DataStore, Retrofit2, OkHttp3, CameraX, ZXing, Navigation Compose
-- [x] `AndroidManifest.xml` 권한 선언 (`MANAGE_EXTERNAL_STORAGE`, `NOTIFICATION_LISTENER`, `SMS`, `CALL_LOG`, `READ_CONTACTS`, `PACKAGE_USAGE_STATS`, `LOCATION`, `CAMERA`, `FOREGROUND_SERVICE_DATA_SYNC`)
-- [x] DataStore Preferences (`AppPreferences.kt`) 및 Retrofit API Service (`MyLoreApiService.kt`) 구현
+### 5.1 필수 권한 목록 (`AndroidManifest.xml`)
+1. **`MANAGE_EXTERNAL_STORAGE` (모든 파일 접근 권한)**:
+   - `Documents/KakaoTalk/Chats`, `Recordings/{Call,TPhoneCallRecords,Voice Recorder}`, `Download/Samsung Health`, 그리고 5대 사진 폴더(`Camera`, `Pictures`, `Screen recordings`, `Screenshots`, `Videocaptures`)를 백그라운드에서 직접 스캔·읽기 위해 필수입니다.
+2. **`BIND_NOTIFICATION_LISTENER_SERVICE` (알림 접근 허용)**: 상단바 푸시 알림 실시간 캡처.
+3. **`READ_SMS` / `RECEIVE_SMS`**: 단문/장문 문자 읽기 및 실시간 수신 감지.
+4. **`READ_CALL_LOG` / `READ_PHONE_STATE` / `READ_CONTACTS` / `WRITE_CONTACTS`**: 통화 이력 수집, 통화 종료 감지, 주소록 이름 매핑 및 명함 연락처 저장.
+5. **`PACKAGE_USAGE_STATS` (사용정보 접근 허용)**: `UsageStatsManager`를 통한 앱별 사용시간 수집.
+6. **`ACCESS_FINE_LOCATION` / `ACCESS_BACKGROUND_LOCATION`**: Android 8.1+ Wi-Fi SSID 조회용 위치 권한.
+7. **`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` / `FOREGROUND_SERVICE` / `FOREGROUND_SERVICE_DATA_SYNC`**: 절전 모드 우회 및 실시간 동기화 Foreground Service 유지.
+8. **`CAMERA`**: QR 코드 페어링 및 실시간 누적 명함 스캔.
 
-### 📌 Phase 2: QR 페어링 & 7대 수집기 (Collector) 구현 (`완료`)
-- [x] CameraX + ZXing 기반 QR 스캐너 액티비티 (`QrScannerActivity.kt`)
-- [x] `MyloreNotificationListener`, `SmsAndMmsCollector`, `CallLogCollector`, `KakaoChatFolderWatcher` 기본 구현
-- [x] `KakaoChatFolderWatcher` 고도화: 대화방별 최신 폴더 1개만 선별 + 바이트 오프셋 기반 증분 슬라이싱(Delta Slicing) 적용
-- [x] `CallRecordingCollector` 추가: `/sdcard/Recordings/Call` 내 통화 녹음(`.m4a`/`.amr`) 증분 스캔 및 업로드
-- [x] `ContactsCollector` 추가: `ContactsContract` 기반 연락처 증분 수집 (`last_contact_ts` 이후 변경분)
-- [x] `AppUsageCollector` 추가: `UsageStatsManager` 기반 일자별 앱 사용시간(Screen Time) 수집
-
-### 📌 Phase 3: 동기화 엔진 (Sync Engine) 및 PC 서버 `.md` 스크립트 생성기 (`완료`)
-- [x] `SyncConditionMonitor` (Wi-Fi SSID + 충전 상태 + PC 서버 Ping 3대 조건 판별기)
-- [x] `RealtimeSyncForegroundService` (DataSync Foreground Service: Noti, SMS, CallLog, Kakao, Contacts, AppUsage, CallRecordings 실시간 파이프라인 완비)
-- [x] PC 서버 `mobile/{kakao,sms,calls,contacts,notifications,usage}` 6대 폴더 마크다운(`.md`) 자동 스크립트 변환 및 증분 Append 엔진 구현
-- [x] PC 서버 `multipart/form-data` 파트 분리 파서 및 `file_hash` 정합성 검증 수정 완료
-
-### 📌 Phase 4: 스마트 명함 스캐너 & 연락처 관리 고도화 (`완료`)
-- [x] 실시간 ML Kit 다수결 누적 투표 카메라 + Google Document Scanner 3D 모서리 원근 보정 하이브리드 파이프라인
-- [x] 명함 사진 수동/자동 회전 보정 다이얼로그 및 우상단 재촬영 원형 배지(`[🔄]`)
-- [x] 연락처 런타임 권한 자동 요청 및 거부 시 앱 설정 화면 원클릭 이동 안내
-- [x] 연락처 신규 저장 시 삼성/안드로이드 기본 클라우드 계정 바인딩 지원 (`Cannot add contacts to local or SIM accounts when default account is set to cloud` 에러 해결)
-- [x] 필수 입력값(이름, 연락처) 미입력 시 인라인 에러 피드백(빨간색 테두리, 에러문구) 및 자동 스크롤/포커스 UI 구현 완료
-
-### 📌 Phase 5: 8대 워터마크 상호 동기화, 카톡/알림 순차 파이프라인 및 모바일 UI 오버레이 개편 (`완료`)
-- [x] 8대 서비스 워터마크 상호 공유 (`POST /api/v1/sync/watermarks`) 및 `force_full_sync` 리셋 처리
-- [x] 카카오톡 폴더 단위 원본 적재 (`mobile/kakao/{folder_name}/`) 및 완료 확인 후 기기 내 임시 폴더 안전 자동 삭제 (`verified_for_cleanup == true`)
-- [x] 알림 총 개수 사전 고지(`batch-init`) 및 1건씩 순차 전송 프로토콜 (`current_index` / `total_count`)
-- [x] 모바일 UI 전면 개편: 좌측 슬라이드 오버레이 메뉴(`ModalNavigationDrawer`), 고정 상단바(`statusBarsPadding`), 9대 전용 카테고리 화면(카톡, 문자, 통화, 알림, 녹음, 헬스, 명함, 상태, 설정) 구현 및 실기기 배포 완료
-
----
-
-## 7. 💻 PC 서버(`myLore`) 측 검토 코멘트 및 주의사항
-
-1. **`multipart/form-data` 해시 일치 보장 완료**:
-   - 기존에 `multipart/form-data` 업로드 시 HTTP 바운더리 문자열이 매번 달라져 해시가 다르게 계산되던 문제를 해결했습니다. 이제 PC 서버는 Multipart 내부의 `name="file_hash"` 파트와 `name="file"` 파트를 정확히 분리하여 추출하고, 안드로이드가 보낸 `SHA-256` `file_hash`를 그대로 `synced_file_hashes` 테이블에 기록합니다.
-2. **안드로이드 카카오톡 내보내기 텍스트 포맷 완벽 지원**:
-   - 안드로이드 카카오톡 내보내기 포맷(`2026년 10월 28일 오후 9:12, 박재홍 : 메시지내용` 및 다중 줄바꿈 메시지)과 PC 카카오톡 포맷(`[박재홍] [오후 9:12] 메시지내용`)을 모두 파싱하여 `mobile/kakao/<대화방명>.md` 문서에 날짜별(`## 📅 YYYY-MM-DD`)로 중복 없이 병합합니다.
-3. **신규 권한 안내 (`READ_CONTACTS`, `PACKAGE_USAGE_STATS`)**:
-   - 연락처 수집을 위해 런타임 권한 `Manifest.permission.READ_CONTACTS`를 요청해 주세요.
-   - 휴대폰 사용시간 수집을 위해 `Settings.ACTION_USAGE_ACCESS_SETTINGS` 인텐트로 사용자에게 **[사용정보 접근 허용]** 권한을 안내한 뒤 `UsageStatsManager.queryAndAggregateUsageStats()`를 호출해 주세요.
-
----
-
-## 8. 🔍 명함 스캐너 오류 원인 분석 및 UI 피드백 개선 마일스톤
-
-### 8.1 오류 로그 분석 결과
-- **발생 오류**: `java.lang.IllegalArgumentException: Cannot add contacts to local or SIM accounts when default account is set to cloud`
-- **발생 위치**: `ContactManager.createContact()` (`ContactsContract.RawContacts.CONTENT_URI` insert)
-- **발생 원인**:
-  - 삼성 갤럭시 등 최신 안드로이드 기기에서 기본 연락처 저장 계정이 **Google 계정 또는 Samsung Cloud 계정**으로 설정되어 있는 경우, `ACCOUNT_NAME = null`, `ACCOUNT_TYPE = null`로 새 연락처를 로컬(휴대폰 내부) 또는 SIM 계정에 추가하려고 시도하면 안드로이드 Contacts Provider가 보안/정책상 `IllegalArgumentException`을 던지며 저장을 거부함.
-- **해결 방안 (적용 완료)**:
-  1. `ContactManager`에 `getPreferredAccount()`를 구현하여 기존 연락처의 `RawContacts` 및 `AccountManager`에서 활성화된 기본 클라우드 계정(Google/Samsung 계정 이름 및 타입)을 자동으로 조회.
-  2. 조회된 기본 계정을 `RawContacts.withValue(ACCOUNT_NAME, accountName)`, `withValue(ACCOUNT_TYPE, accountType)`로 바인딩하여 저장하도록 수정.
-  3. 프로필 썸네일 이미지가 커질 경우 Binder Transaction Buffer(1MB) 초과로 실패하는 현상을 방지하기 위해 사진을 최대 480px, 압축률 80%로 안전하게 다운샘플링 적용.
-
-### 8.2 사용자 UI 피드백 방안 (마일스톤 태스크)
-1. **필수 입력값 실시간 검증 및 인라인 피드백**:
-   - **이름(Name)**: 비어있을 경우 저장 버튼 클릭 시 '이름을 입력해주세요' 빨간색 안내문구 표시 및 해당 입력창으로 자동 스크롤/포커스.
-   - **연락처(전화번호/이메일)**: 휴대폰, 일반전화, 이메일이 모두 비어있는 경우 '전화번호 또는 이메일 중 최소 하나를 입력해주세요' 토스트 안내.
-2. **저장 실패 시 원인 세부 피드백**:
-   - 기존의 단순 모호한 문구(`연락처 저장에 실패했습니다. 입력값을 확인해주세요.`) 대신, 시스템 예외 메시지를 해석하여 맞춤형 안내(`연락처 저장 실패: [구글 계정 동기화 오류 / 저장 권한 오류 / 필수값 누락]`) 제공.
-
----
-
-## 9. 🚀 2026-10-30 추가 구현 규격: 기본 카메라 QR 딥링크, 다중 기기(Multi-Device) 연동, 과거 전체 데이터 재수집(Full Resync)
-
-### 9.1 기본 카메라 QR 촬영 시 `myLore Sync` 자동 실행 (Deep-Link URI Scheme)
-1. **QR 코드 인코딩 형식 변경**:
-   - PC `myLore` 대시보드의 QR 코드는 이제 순수 JSON이나 단순 Base64가 아니라, 스마트폰 기본 카메라 앱에서 QR만 비추면 즉시 `myLore Sync` 앱을 호출하고 설정값을 넘겨주는 **Custom URI Scheme 딥링크 문자열**만 제공합니다:
-     ```text
-     myloresync://pair?data=<Base64_Encoded_JSON_Payload>
+### 5.2 주요 안드로이드 OS 제약 해결 명세
+1. **Wi-Fi `<unknown ssid>` 문제 해결**:
+   - 위치 권한 미허용이나 GPS 꺼짐으로 인해 `ssid == "<unknown ssid>"`가 반환되더라도, 현재 기기가 Wi-Fi(`TRANSPORT_WIFI`)에 연결되어 있고 PC 서버(`GET /api/v1/status`)가 1.5초 이내에 정상 응답하면 동기화를 즉시 수행합니다.
+2. **삼성 One UI 절전 모드 및 Doze 모드 대응**:
+   - 배터리 사용량 '제한 없음' 등록을 유도하고, 동기화 활성 시 `ForegroundService`(`dataSync`)와 `WifiManager.WifiLock`(`WIFI_MODE_FULL_HIGH_PERF`)을 획득하여 화면이 꺼진 상태에서도 소켓 동결을 방지합니다.
+3. **삼성/안드로이드 클라우드 기본 연락처 계정 바인딩 (`ContactManager`)**:
+   - 최신 갤럭시 기기에서 기본 연락처 저장 위치가 Google 또는 Samsung Cloud 계정으로 설정된 경우 `ACCOUNT_NAME = null`로 저장 시 발생하는 `IllegalArgumentException: Cannot add contacts to local or SIM accounts when default account is set to cloud` 오류를 방지하기 위해, `getPreferredAccount()`로 활성 클라우드 계정을 조회하여 바인딩하고 프로필 썸네일을 480px(80% 압축)로 다운샘플링하여 저장합니다.
+4. **Android 13(API 33)+ 사이드로딩 '제한된 설정(Restricted Settings)' 해제**:
+   - APK 직접 설치 시 `설정 > 애플리케이션 > myLore Sync > 우측 상단(⋮) > [제한된 설정 허용]` 가이드를 제공하며, 개발 PC에서 ADB로 설치할 때는 아래 명령으로 한 번에 모든 권한을 부여할 수 있습니다:
+     ```bat
+     adb install -r -g app-debug.apk
+     adb shell appops set com.iseohyun.mylore.sync SYSTEM_ALERT_WINDOW allow
+     adb shell appops set com.iseohyun.mylore.sync MANAGE_EXTERNAL_STORAGE allow
+     adb shell appops set com.iseohyun.mylore.sync GET_USAGE_STATS allow
+     adb shell cmd notification allow_listener com.iseohyun.mylore.sync/.collector.MyloreNotificationListener
      ```
-2. **안드로이드 `AndroidManifest.xml` 인텐트 필터 추가 명세**:
-   - 메인 액티비티(또는 페어링 처리 액티비티)에 아래 `<intent-filter>`를 등록합니다:
-     ```xml
-     <intent-filter>
-         <action android:name="android.intent.action.VIEW" />
-         <category android:name="android.intent.category.DEFAULT" />
-         <category android:name="android.intent.category.BROWSABLE" />
-         <data android:scheme="myloresync" android:host="pair" />
-     </intent-filter>
-     ```
-3. **딥링크 수신 및 파싱 로직**:
-   - `intent?.data?.scheme == "myloresync"` 및 `intent?.data?.host == "pair"` 감지 시, `intent.data.getQueryParameter("data")`로 Base64 문자열을 추출하여 Base64 디코딩 후 JSON(`v`, `pc_name`, `ips`, `port`, `token`, `ssids`)을 파싱하고 즉시 `POST /api/v1/pair/confirm`을 호출하여 페어링을 완료합니다.
-   - 앱 내부 QR 스캐너(`QrScannerActivity`)에서도 `myloresync://pair?data=` 접두사가 있는 경우 `data` 파라미터를 추출하고, 기존 하위 호환을 위해 순수 Base64 문자열도 함께 처리합니다.
-
-### 9.2 다중 기기(Multi-Device) 연결 및 기기별 독립 워터마크·출처(Attribution) 기록
-1. **기기 추가 연결 (`다른 기기 연결`) 및 특정 기기 제거 (`기기 제거`)**:
-   - PC 서버는 토큰을 재발급하여 기존 기기를 끊는 방식 대신, 동일한 보안 토큰 아래 여러 대의 스마트폰(`paired_devices` 테이블)을 동시에 등록·유지합니다.
-   - PC 대시보드에서 특정 기기의 `[기기 제거]` 클릭 시 해당 `device_id`만 `paired_devices`에서 제거됩니다.
-2. **기기 식별 헤더 및 쿼리 파라미터 (`X-MyLore-Device-Id`, `X-MyLore-Device-Name`)**:
-   - 모바일 앱이 `GET /api/v1/status?device_id=<device_id>` 호출 시(또는 `X-MyLore-Device-Id` 헤더 전송 시), PC 서버는 **해당 기기 전용 워터마크(`last_noti_ts`, `last_sms_ts`, `last_call_ts`, `last_contact_ts`, `last_usage_ts`)**를 반환합니다. 이를 통해 기기 A와 기기 B의 동기화 시점이 서로 간섭하거나 누락되지 않습니다.
-   - 모든 동기화 API(`POST /api/v1/sync/notifications`, `sms`, `call-logs`, `kakao-chats`, `call-recordings`, `contacts`, `app-usage`) 호출 시 HTTP 헤더에 아래 두 항목을 포함합니다(또는 JSON 루트에 `"device_id"`, `"device_name"` 포함):
-     ```http
-     X-MyLore-Device-Id: dev_a1b2c3d4
-     X-MyLore-Device-Name: Galaxy S24 Ultra
-     ```
-   - PC 서버는 수신된 모든 메시지(`lifelog_messages`)와 통화 기록(`lifelog_call_logs`)에 `device_id` 및 `device_name`을 함께 저장하여 어느 기기에서 수집된 데이터인지 대시보드에 표시합니다.
-
-### 9.3 과거 모든 데이터 받아오기 및 점진적 역방향/누락 동기화 (Backfill & Gap-Detection Sync 프로토콜)
-
-> **핵심 설계 원칙 (No Blind Full Resets)**:  
-> "과거 모든 데이터 받아오기" 시나리오는 로컬 저장소를 실제로 무차별 초기화하여 모든 데이터를 처음부터 무조건 다시 받는 것이 아닙니다.  
-> **이전에 PC 서버로 이미 전달된 데이터 기록을 확인하고, 서버에 없는 누락 데이터(Gap)를 정확히 파악한 뒤, 그중 "가장 오래된 데이터(Oldest Unsynced Record)"부터 시작하여 시간순으로 차근차근 전송하는 작업**입니다.
-
-1. **서버 연결 시 순차 스트리밍 전송 & 실시간 워터마크 갱신**:
-   - 모바일 기기가 3대 조건(지정 Wi-Fi, 충전 중, myLore 서버 통신 가능)을 충족하여 서버와 연결되면, **가장 오래된 미전송 데이터(`ts > 0`인 데이터 중 최솟값)부터 시작하여 연결이 끊길 때까지 시간순(ASC)으로 차근차근 데이터를 전송**합니다.
-   - 단일 레코드(또는 배치 블록)가 서버로 완전히 전송 완료(`200 OK` 및 `ACK` 수신)될 때마다, 모바일과 서버 양측은 **"전송되지 않은 가장 오래된 데이터의 시점(Oldest Unsynced Timestamp)"**을 즉시 전진(Advance) 갱신합니다.
-   - 이를 통해 동기화 도중 Wi-Fi 이탈, 충전 케이블 분리 등으로 연결이 갑작스럽게 끊기더라도, 이미 완료된 레코드 시점까지 안전하게 보존되어 다음 연결 시 중단된 지점부터 즉시 이어서 전송(Resumable Streaming)됩니다.
-
-2. **전송 불변성 규칙(Invariance Rule) 및 과거 누락 데이터(Gap) 재정의**:
-   - **불변성 전제 조건**: **"전송되지 않은 가장 오래된 데이터(Oldest Unsynced Timestamp)"보다 이전 시점의 모든 과거 데이터는 반드시 서버 전송 기록이 100% 온전히 존재**해야 합니다.
-   - **누락 데이터(Gap) 감지 및 워터마크 되감기(Rewind)**:
-     - 동기화 시작 전(또는 백필 검사 시), "전송되지 않은 가장 오래된 시점"보다 이전 타임스탬프를 가진 데이터 중 전송 기록(`is_synced == false` 또는 서버 누락)이 없는 레코드가 발견되면, 해당 데이터는 아직 전송되지 않은 것으로 간주합니다.
-     - 모바일 Sync 엔진은 발견된 누락 데이터 중 가장 과거의 시점으로 **"아직 전송되지 않은 가장 오래된 데이터"의 기준점을 즉시 재정의(Rewind)**하여, 어떤 과거 데이터도 누락 없이 완벽하게 복구 전송되도록 보장합니다.
-
-3. **PC ➔ 모바일 재동기화 트리거 및 시퀀스**:
-   - PC 대시보드 설정에서 `[과거 모든 데이터 받아오기]` 클릭 시:
-     1) PC 서버는 `force_full_sync = true` 플래그 및 UDP 브로드캐스트(`MYLORE_FULL_RESYNC`)를 발송합니다.
-     2) 모바일 Sync 앱은 기존 로컬 데이터를 삭제하지 않고, 서버와 대조하여 전송 완료 플래그가 비어 있거나 누락된 레코드들을 추출합니다.
-     3) 추출된 누락 대상 중 **가장 오래된 데이터**부터 시작하여 서버가 연결되어 있는 동안 순차적으로 업로드 및 워터마크를 전진시킵니다.
-
-### 9.4 카카오톡 동기화 완료 후 자동 정리 (`Sync & Clean`)
-- 모바일 앱이 `POST /api/v1/sync/kakao-chats`로 내보내기 파일을 업로드한 후, PC 서버 응답에 `"verified_for_cleanup": true` 플래그가 포함되어 있으면, 모바일 앱은 스마트폰 저장 공간 확보를 위해 해당 임시 백업 폴더(`Documents/KakaoTalk/Chats/{폴더명}`)를 `deleteRecursively()`로 안전하게 자동 삭제합니다.
-
-### 9.5 MMS(장문 문자 / 사진 첨부) 통합 수집 규격
-- **수집 데이터 소스**: 안드로이드의 `content://mms`, `content://mms/part`, `content://mms/{mms_id}/addr`
-- **MMS 수집 방식**:
-  - `date`: MMS 테이블의 `date`는 초(Second) 단위이므로 밀리초 변환(`date * 1000L`) 적용.
-  - `address`: `content://mms/{mms_id}/addr`에서 `type=137`(발신자, inbox) 또는 `type=151`(수신자, sent)을 파싱하여 발신자 번호/이름 획득.
-  - `body` & 미디어: `content://mms/part`에서 `ct`(Content-Type)가 `text/plain`인 텍스트 본문과 `image/*`, `video/*`, `audio/*` 첨부파일 정보를 결합하여 `[제목]`, `[사진 첨부: 파일명]`, `본문내용` 형태로 `POST /api/v1/sync/sms`로 전송.
-  - 고유 ID 체계: MMS ID 충돌을 방지하기 위해 `1_000_000_000L + mms_id` 오프셋 적용.
-
-### 9.6 통화녹음 및 음성녹음 확장 (T전화, 삼성 음성녹음, 갤럭시 워치 음성메모)
-- **탐색 디렉터리 (재귀 탐색)**:
-  1. `/sdcard/Recordings/TPhoneCallRecords`: SKT T전화 통화 녹음 (파일명 형식: `#이름_전화번호_YYYYMMDDHHMMSS.m4a` 또는 `#이름(메모)_전화번호_...`)
-  2. `/sdcard/Recordings/Call`: 삼성 기본 전화 통화 녹음 (파일명 형식: `통화 녹음_이름_전화번호_YYMMDD_HHMMSS.m4a`)
-  3. `/sdcard/Recordings/Voice Recorder`: 삼성 기본 음성 녹음 (파일명 형식: `음성 YYMMDD_HHMMSS.m4a`)
-  4. `/sdcard/Recordings/Sounds/Watch`: 갤럭시 워치 음성 메모/녹음 (파일명 형식: `음성 001_W_YYYYMMDD_HHMMSS.m4a`)
-- **수집 및 메타데이터 파싱**: 파일명에서 전화번호, 상대방/녹음 유형, 녹음 시작 일시를 자동 파싱하여 `POST /api/v1/sync/call-recordings`를 통해 PC 서버로 전송. PC 서버는 이를 Gemini STT를 통해 스크립트화하여 마크다운 파일로 기록.
-
-### 9.7 앱 사용량(`PACKAGE_USAGE_STATS`) 수집 권한 및 UI 설정 유도
-- **필수 권한 선언**: `AndroidManifest.xml`에 `<uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" tools:ignore="ProtectedPermissions" />` 선언 필수.
-  - 해당 권한이 매니페스트에 없으면 안드로이드 OS 설정의 "사용정보 접근 허용" 앱 목록에 앱 자체가 검색되지 않고 숨겨짐.
-- **UI 원클릭 설정 유도**: 대시보드 화면에서 `AppOpsManager` 권한 상태를 실시간 체크하여 미허용 시 상단 경고 배너 및 `Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)` [권한 허용] 버튼을 제공, `package:{packageName}` URI로 즉시 해당 앱 권한 설정창으로 이동 유도.
 
 ---
 
-## 10. 삼성 헬스 & 갤럭시 워치 운동·GPS 데이터 동기화 규격
-
-스마트폰의 `/sdcard/Download/Samsung Health/` 경로에 백업·내보내기된 삼성 헬스 및 갤럭시 워치 운동 기록을 PC 서버의 `mobile/health/` 디렉터리에 동기화하고 시각화합니다.
-
-### 10.1 내보내기 폴더 구조 및 최신 데이터 판별
-- **폴더 명명 규칙**: `samsunghealth_{사용자계정}_{YYYYMMDDHHMMSS}/`
-  - 동일 폴더가 여러 개 존재할 경우 폴더명의 타임스탬프가 가장 큰 폴더를 최신으로 판별합니다. (예: `samsunghealth_iseohyun_20250429104386`이 `...101907`보다 최신)
-- **주요 데이터 파일 구성**:
-  1. `com.samsung.shealth.exercise.{timestamp}.csv`: 운동 세션 요약 목록 (운동 시작/종료 시각, 소모 칼로리, 심박수 요약, 운동 종류, 거리 등)
-  2. `com.samsung.shealth.tracker.pedometer_day_summary.{timestamp}.csv`: 일자별 걸음수 통계
-  3. `com.samsung.shealth.tracker.heart_rate.{timestamp}.csv`: 심박수 일일 요약
-  4. `jsons/com.samsung.shealth.exercise/{0..f}/{UUID}.com.samsung.health.exercise.location_data.json`: **갤럭시 워치 운동 실시간 GPS 이동 경로 (초 단위 위도, 경도, 고도, 정확도)**
-  5. `jsons/com.samsung.shealth.exercise/{0..f}/{UUID}.com.samsung.health.exercise.live_data.json`: **실시간 심박수 및 누적 거리 데이터**
-
-### 10.2 PC 서버 수신 및 마크다운·GPX 변환 규격
-- **엔드포인트**: `POST /api/v1/sync/samsung-health` (multipart 또는 ZIP 아카이브 업로드)
-- **PC 서버 처리**:
-  - `mobile/health/{YYYY-MM}_운동기록.md` 파일에 날짜별 운동 요약(종목, 소요시간, 소모 칼로리, 평균 심박수)을 테이블 형태로 자동 생성.
-  - `location_data.json`의 GPS 좌표 목록을 표준 **`.gpx`** 파일(`mobile/health/gpx/{YYYYMMDD_HHMMSS}_{종목}.gpx`)로 자동 변환 저장하여 지도 뷰어에서 운동 이동 경로를 재생 및 시각화 가능하도록 지원.
-
----
-
-## 11. 🔄 서비스별 워터마크 상호 공유 및 카톡(폴더 단위)·알림(1건 순차) 동기화 규격
-
-### 11.1 서비스별 전송 완료 시점(Watermark) 상호 공유 (`POST /api/v1/sync/watermarks`)
-- 모바일 Sync 앱과 PC 서버는 모든 데이터 업데이트 시 서비스별로 전송 완료 시점(`last_kakao_ts`, `last_noti_ts`, `last_sms_ts`, `last_call_ts`, `last_recording_ts`, `last_health_ts`, `last_contact_ts`, `last_usage_ts`)을 각각 기억하고 상호 공유(최댓값 병합)합니다.
-- `force_full_sync == true`인 경우에만 모든 워터마크가 `0`으로 리셋됩니다.
-
-### 11.2 카카오톡(KakaoTalk) 폴더 단위 동기화 및 원본 폴더 적재 프로토콜
-1. **외부 방출 탐색 및 총 폴더 수 선발송 (`POST /api/v1/sync/batch-init`)**:
-   - 사용자가 카카오톡 앱 내에서 대화 내보내기를 수행하면, 모바일 Sync 앱이 `Documents/KakaoTalk/Chats/` 내보내기 폴더들을 탐색합니다.
-   - 전달할 **전체 폴더 개수(`total_count`)**를 `POST /api/v1/sync/batch-init` (`{"service": "kakaotalk", "total_count": N}`)으로 먼저 서버에 알립니다.
-2. **폴더 1개씩 순차 전송 및 원본 적재 (`mobile/kakao/{folder_name}/`)**:
-   - 각 폴더에 포함된 이미지·동영상 파일들을 수정하지 않고 그대로 `POST /api/v1/sync/media` (`folder_name` 포함)로 업로드하여 PC의 `mobile/kakao/{folder_name}/`에 원본 그대로 적재합니다.
-   - 이어서 `KakaoTalkChats.txt`를 `folder_index` / `total_folders`와 함께 `POST /api/v1/sync/kakao-chats`로 전송합니다.
-3. **기존 대화 중복 확인·병합, `.md` 메타데이터 보관, 완료 폴더 삭제**:
-   - PC 서버는 수신된 대화 내용 중 기존 대화와 겹치는 부분(`overlapping_count`, 파란색 바)과 신규 부분(`messages_added`, 녹색 바)을 판별하여 `mobile/kakao/{대화방명}.md`를 업데이트하고, 상단 프론트매터에 대화 메타데이터(`raw_folder`, `participants`, `overlapping_messages`, `newly_added_messages`, `media_files_in_folder`, `last_kakao_ts`, `last_synced`)를 보관합니다.
-   - PC 서버가 백분위(`percent`) 진행률을 UI에 실시간 표시하고 `"verified_for_cleanup": true`를 응답하면, 모바일 Sync 앱은 즉시 해당 내보내기 폴더를 삭제합니다.
-
-### 11.3 알림(Notification) 총 개수 선발송 및 1건씩 순차 전달 프로토콜
-1. 전달할 미동기화 알림의 **총 개수(`total_count`)**를 `POST /api/v1/sync/batch-init` (`{"service": "notification", "total_count": N}`)으로 먼저 전달합니다.
-2. 이후 알림을 **1건씩(`current_index` / `total_count`)** `POST /api/v1/sync/notifications`로 순차 전달하며, PC 서버는 실시간 백분위 진행률(%)을 UI에 표시합니다.
-
-### 11.4 비동기 별도 다운로드 스레드 분리 (열람 무중단 보장)
-- PC 서버의 모든 모바일 수신 엔드포인트는 요청별 독립 백그라운드 스레드에서 동작하며, SQLite WAL 모드 및 비동기 파일 읽기(`spawn_blocking`)를 통해 신규 데이터가 다운로드되는 도중에도 이미 전송받은 문서를 열람·편집·미디어 재생하는 데 지장이 없도록 격리됩니다.
-
----
-
-## 12. 📱 모바일 UI 아키텍처: 좌측 슬라이드 오버레이 메뉴(Drawer) 및 9대 카테고리 화면 규격
-
-### 12.1 상단 여백 보정 및 고정 상단바 헤더
-- **상태바 및 펀치홀 카메라 여백**: 모든 화면 루트에 `Modifier.statusBarsPadding()`을 적용하여 상태바 및 디스플레이 노치와 UI가 겹치지 않도록 안전 여백을 확보합니다.
-- **고정 상단바 헤더(Fixed Header)**: 스크롤 가능한 본문 영역(`verticalScroll` / `LazyColumn`) 외부에 상단바(좌측 삼선 햄버거 메뉴 버튼 `☰`, 화면 타이틀)를 고정 배치하여, 사용자가 리스트를 아래로 스크롤한 상태에서도 언제든지 메뉴바를 열 수 있도록 보장합니다.
-
-### 12.2 좌측 슬라이드 오버레이 내비게이션 드로어 (`ModalNavigationDrawer`)
-- 상단바 좌측 `☰` 버튼 클릭 시 왼쪽에서 기본 화면을 오버레이하며 부드럽게 등장하는 슬라이드 인/아웃 애니메이션을 제공합니다.
-- 메뉴 항목은 실시간 동기화 상태 및 데이터 유형에 따라 상단 그룹 6개, 하단 그룹 3개(구분선 `<hr>` 적용)로 구성됩니다:
-
-```text
-myLore Sync (스마트폰 라이프로그 동기화)
-├── 💬 카톡
-├── ✉️ 문자
-├── 📞 통화
-├── 🔔 알림
-├── 🎙️ 녹음
-├── 🏃 헬스
---------------------------------- (HorizontalDivider)
-├── 📇 명함
-├── 📊 상태
-└── ⚙️ 설정
-```
-
-### 12.3 9대 전용 카테고리 화면별 메타데이터 구성
-
-| 화면 | 주요 기능 및 메타데이터 구성 |
-| :--- | :--- |
-| **💬 카톡** (`KakaoListScreen`) | • `Documents/KakaoTalk/Chats` 내보내기 대화방 목록 스캔<br>• **각 대화방별 공유되어야 할 용량 측정**: 총 용량(MB), 텍스트 용량 및 첨부 미디어(사진/동영상) 용량·파일 개수 정밀 분석<br>• **그래픽 진행률 바 (`LinearProgressIndicator`)**: 현재 몇 %가 공유되었는지 시각화 (전송 완료 녹색 / 진행 중 파란색 / 대기 주황색 배지 및 진행률 게이지)<br>• 각 대화방 카드별 **"가장 마지막 대화 내용"**<br>• **"마지막 대화 일시"** 및 **"PC에 공유된 마지막 순간"** 타임스탬프 표시<br>• 상단 요약 카드: 총 대화방 수 및 전체 공유 대상 총 용량 대비 전송 완료 진행률 바 제공 |
-| **✉️ 문자** (`SmsListScreen`) | • 스마트폰 내 전체 SMS + MMS 목록 집계 및 시간순 정렬<br>• 각 문자 건별 서버 전송 여부 배지 (`전송 완료` / `전송 대기`)<br>• 상단 요약 카드: **"아직 서버로 전송하지 않은 가장 오래된 문자 시점"** 및 보유 총 문자 수 표시 |
-| **📞 통화** (`CallListScreen`) | • 전체 통화 이력(수신/발신/부재중) 목록<br>• 각 통화 건별 통화기록 전송 여부 배지 및 통화 녹음 파일(Call/TPhoneCallRecords) 매칭 보유 배지<br>• 상단 요약 카드: **"아직 서버로 전송하지 않은 가장 오래된 통화음성 시점"** 표시 |
-| **🔔 알림** (`NotificationListScreen`) | • 안드로이드 상단바 시스템 및 앱 푸시 알림 수집 내역<br>• 각 알림 건별 서버 전송 여부 (`isSynced` 상태 배지)<br>• 상단 요약 카드: **"아직 서버로 전송하지 않은 가장 오래된 알림 시점"** 표시 |
-| **🎙️ 녹음** (`RecordingsListScreen`) | • `Recordings/Voice Recorder`, `Sounds/Watch`, `TPhoneCallRecords` 등 기기 내 전체 음성 녹음 파일 스캔<br>• 각 녹음 건별 파일 크기, 녹음 일시 및 서버 전송 상태 배지<br>• 상단 요약 카드: **"보유 녹음 파일 수 및 가장 오래된 녹음 시점"** 표시 |
-| **🏃 헬스** (`HealthSyncScreen`) | • `Download/Samsung Health` 내 운동 세션 CSV 및 워치 GPS 이동 경로 JSON 요약<br>• PC 서버로 전송할 헬스 데이터 현황 표시<br>• **"모든 데이터를 전송하고 완료되면 데이터 삭제"** 기능 (`deleteRecursively()` 안전 다이얼로그 연동) |
-| **📇 명함** (`BusinessCardWalletScreen`) | • 상단 우측 `➕` 버튼: 실시간 누적 명함 스캐너(`LiveCardScannerActivity`) 실행<br>• 이름, 회사명, 직책, 전화번호 검색창<br>• 보관 중인 명함 목록 카드 (회사명과 직책/직급 다른 행 분리 렌더링) |
-| **📊 상태** (`StatusDashboardContent`) | • 3대 동기화 조건 실시간 상태 카드: **1. 서버 Wi-Fi 연결 여부 (미연결 시 탭하여 서버 Wi-Fi 원클릭 연결)**, **2. 배터리 충전 중 여부**, **3. myLore 서버 연결 여부**<br>• 서버가 켜져있음에도 오프라인으로 감지될 경우, 상태 카드 내 **[오프라인 (클릭하여 QR 재연결)]**을 탭하여 PC 화면의 QR 코드를 스캔함으로써 즉시 재연결 및 IP/포트/토큰/서버 Wi-Fi 자동 갱신 지원<br>• `🔄 수동 동기화` 및 `📷 실시간 누적 스캔` 바로가기 버튼<br>• 실시간 라이프로그 전송 로그 터미널 뷰어 |
-| **⚙️ 설정** (`SettingsScreen`) | • **9대 시스템 권한 실시간 상태 배지 (`[허용됨]` / `[미허용]`) 및 항목별 `[열기]` 버튼**: 알림 접근, 앱 사용정보, 모든 파일 접근, 연락처, 문자, 통화 기록, 위치, 카메라, 배터리 최적화 예외<br>• myLore Sync 전체 앱 상세 설정 원클릭 버튼<br>• **서버 소속 Wi-Fi (NAT)**: 수동 SSID 목록 관리 전면 제거 완료, QR 페어링으로 수신된 서버 소속 Wi-Fi(SSID 및 비밀번호) 정보 표시 및 원클릭 Wi-Fi 연결 지원<br>• PC IP / 포트 / 토큰 정보 및 PC 연동 해제(Unpair) 기능 |
-
----
-
-## 13. ⚡ 초고속 목록 로딩(선 캐시 표시 · 후 지연 업데이트) 및 유휴 시점 서버-단말 목록 정합성(Reconciliation) 프로토콜
-
-### 13.1 문제 배경 및 해결 전략 (Fast Load + Delayed Delta Update)
-
-1. **기존 재조회 지연 원인**:
-   - 화면을 열 때마다 카톡(`KakaoTalkChats.txt` 첫 줄부터 끝까지 전체 순회), 문자(`0L`부터 수천 건의 SMS 및 MMS Part 개별 ContentResolver 쿼리), 통화/녹음(수백 개 `.m4a` 오디오 파일 전체 SHA-256 해시 재계산), 헬스(`Download/Samsung Health` 하위 수천 개 JSON 파일 `walkTopDown` 탐색)를 매번 처음부터 다시 조회하여 심각한 로딩 지연이 발생했습니다.
-   - 특히 **카카오톡**과 **삼성 헬스**의 경우 서버 전송 완료 후 스마트폰 저장 공간 확보를 위해 원본 내보내기 폴더가 삭제(`Sync & Clean`)되므로, 파일 시스템만 스캔하면 과거에 공유했던 대화방 및 헬스 전송 이력이 화면에서 사라지는 문제가 있었습니다.
-
-2. **해결 아키텍처 — 선(先) 로컬 캐시 즉시 렌더링 (`0ms`) + 후(後) 증분 지연 업데이트 (`Delayed Delta Update`)**:
-   - **문자(`sms_cache`), 통화(`call_log_cache`), 알림(`notifications`), 녹음(`recording_cache`)**:
-     - 기존 데이터는 변하지 않고 **`기존 내용 + 신규 추가 내용(Append-Only)`** 구조이므로, 화면 진입 즉시 로컬 Room DB(`SyncCacheDao`)에 저장된 기존 목록을 **0ms(대기 없이 즉시)** 화면에 렌더링합니다.
-     - 동시에 백그라운드에서 **`max(cached_ts)` 이후에 새로 추가된 레코드만 증분 조회**하여 리스트에 지연 반영(Stale-While-Revalidate)합니다.
-     - 녹음 파일(`recording_cache`)은 `(filePath, fileSize, lastModified)`가 캐시와 일치하면 `SHA-256` 해시 계산을 완전히 생략하고 신규 녹음 파일만 해시를 계산합니다.
-   - **카카오톡(`kakao_room_cache`) & 삼성 헬스(`health_sync_cache`) — 전송 후 원본 삭제 대응**:
-     - 전송 완료 후 기기에서 내보내기 폴더가 삭제되더라도(`isOnDevice = false`), 로컬 캐시 DB에 **"전송된 가장 최신 파일의 종류(카톡: 대화방명 또는 대화 상대 / 헬스: 최신 운동·데이터 종류)"**와 **"마지막 대화/데이터 시각(`lastMessageTime` / `lastDataTime`)"**, **"PC에 공유된 마지막 순간(`lastSharedTime`)"**을 영구 유지합니다.
-     - 또한 카톡 텍스트 파일(`KakaoTalkChats.txt`) 스캔 시 파일 전체를 읽지 않고 `RandomAccessFile.seek(length - 16384)`로 **파일 끝 16KB만 O(1) 속도로 읽어들여** 마지막 대화 내용과 실제 마지막 대화 시각(`YYYY년 M월 D일 오전/오후 H:mm`)을 추출합니다.
-
----
-
-### 13.2 `myLore Sync` 앱이 유지하는 로컬 캐시 테이블 명세 (`AppDatabase` v3)
-
-| 테이블명 (`Entity`) | Primary Key | 유지하는 핵심 정보 필드 | 용도 및 특징 |
-| :--- | :--- | :--- | :--- |
-| **`kakao_room_cache`**<br>(`KakaoRoomCacheEntity`) | `roomName` (대화방명/상대) | `folderName`, `lastMessage` (마지막 대화), `lastMessageTime` (**마지막 대화 시각**), `lastSharedTime` (**PC 공유 시각**), `totalBytes`, `textBytes`, `mediaBytes`, `mediaCount`, `syncedBytes`, `percent`, `isOnDevice` | 내보내기 폴더가 전송 후 삭제(`isOnDevice = false`)되어도 **대화방명(상대)**과 **마지막 대화 시각**을 유지하여 즉시 표시 |
-| **`health_sync_cache`**<br>(`HealthSyncCacheEntity`) | `folderName` (헬스 백업 폴더명) | `latestRecordType` (**전송된 최신 파일/운동 종류**), `lastDataTime` (**마지막 데이터/운동 시각**), `lastSharedTime` (PC 공유 시각), `csvCount`, `jsonCount`, `totalSizeKb`, `isSynced`, `isOnDevice` | 헬스 폴더 전송 후 기기에서 삭제(`isOnDevice = false`)되어도 **최신 파일 종류**와 **마지막 데이터 시각**을 유지 |
-| **`sms_cache`**<br>(`SmsCacheEntity`) | `id` (SMS / MMS+10억 / RCS+20억) | `address` (상대 번호), `body` (본문), `ts` (수발신 시각), `type` (`inbox`/`sent`), `isSynced` | 최초 1회 스캔 후 `ts > max(ts)`인 신규 문자만 증분 조회하여 즉시 표시 |
-| **`call_log_cache`**<br>(`CallLogCacheEntity`) | `id` (CallLog ID) | `number`, `name`, `callType`, `durationSec`, `ts` (통화 시각), `isSynced` | 최초 1회 스캔 후 `ts > max(ts)`인 신규 통화만 증분 조회하여 즉시 표시 |
-| **`recording_cache`**<br>(`RecordingCacheEntity`) | `filePath` (녹음 파일 절대경로) | `fileName`, `parentFolderName`, `fileSize`, `lastModified`, `fileHash` (**SHA-256 캐시**), `phoneNumber`, `contactName`, `recordedAt`, `isSynced` | `fileSize`와 `lastModified`가 동일하면 SHA-256 재계산을 생략하여 조회 시간을 수 초에서 `10ms` 미만으로 단축 |
-| **`notifications`**<br>(`NotificationEntity`) | `id` (Auto Increment) | `packageName`, `title`, `text`, `subText`, `postedAt`, `isSynced` | 실시간 알림 리스너가 적재한 로컬 DB를 즉시 Flow로 렌더링 |
-
----
-
-### 13.3 유휴 시점(Idle) 서버-단말 간 전송 목록 상호 동기화 프로토콜 (`Reconciliation Protocol`)
-
-모든 대기 데이터 전송을 마치고 **여유가 있을 때(Idle 시점)** 또는 앱 재설치·다중 기기 연동 시, 모바일 `myLore Sync` 앱과 PC `myLore` 서버가 서로 보유한 전송 목록의 싱크(정합성)를 맞추기 위한 양방향 프로토콜입니다.
-
-#### 1) 프로토콜 시퀀스 다이어그램
-```mermaid
-sequenceDiagram
-    participant App as 📱 Mobile myLore Sync (SyncCacheDao)
-    participant Svc as ⚙️ RealtimeSyncForegroundService
-    participant PC as 💻 PC myLore Server
-
-    Note over App: 1. 사용자 화면 진입 (카톡/문자/통화/알림/녹음/헬스)
-    App->>App: Step A: 로컬 Room 캐시(SyncCacheDao) 즉시 렌더링 (0ms, 기존 목록 + 삭제된 카톡/헬스 이력 표시)
-    App->>App: Step B: 백그라운드에서 max(ts) 이후 추가된 신규 항목만 지연 스캔(Delta Update) 후 UI 자동 갱신
-
-    Note over Svc,PC: 2. 실시간 전송 루프 완료 후 유휴(Idle) 상태 진입
-    Svc->>PC: POST /api/v1/sync/reconcile (또는 GET /api/v1/sync/manifest)<br/>{ local_kakao_rooms, local_health_records, local_recording_hashes, last_*_ts }
-    PC->>PC: 서버 보관 중인 mobile/{kakao,health,calls,sms,notifications} 메타데이터와 대조·병합
-    PC-->>Svc: 200 OK (SyncManifestResponse)<br/>{ kakao_rooms, health_records, synced_recording_hashes, synced_sms_ids, synced_call_ids, synced_noti_ids, last_*_ts }
-
-    Note over Svc,App: 3. 로컬 캐시 정합성 갱신
-    Svc->>App: • kakao_room_cache 업데이트 (대화방명, 마지막 대화 시각, 공유 시각 동기화)<br/>• health_sync_cache 업데이트 (최신 파일 종류, 마지막 데이터 시각 동기화)<br/>• recording_cache / sms_cache / call_log_cache / notifications 전송 완료(isSynced) 마킹
-```
-
-#### 2) 요청 명세: `POST /api/v1/sync/reconcile` (`SyncReconcileRequest`)
-모바일 앱이 모든 실시간 전송을 마친 유휴 시점에 현재 단말이 알고 있는 요약 목록을 서버로 전달하며, 단순 조회만 필요할 때는 `GET /api/v1/sync/manifest`를 호출할 수 있습니다.
-
-```json
-{
-  "last_kakao_ts": 1761870000000,
-  "last_sms_ts": 1761865000000,
-  "last_call_ts": 1761860000000,
-  "last_noti_ts": 1761869000000,
-  "last_recording_ts": 1761855000000,
-  "last_health_ts": 1761800000000,
-  "local_kakao_rooms": [
-    {
-      "room_name": "홍길동",
-      "folder_name": "KakaoTalk_Chats_2026-10-30_21.15.00",
-      "last_message": "2026년 10월 30일 오후 9:12, 홍길동 : 내일 뵙겠습니다.",
-      "last_message_ts": 1761826320000,
-      "last_shared_ts": 1761870000000,
-      "total_bytes": 15420000,
-      "synced_bytes": 15420000
-    }
-  ],
-  "local_health_records": [
-    {
-      "folder_name": "samsunghealth_iseohyun_20261030120000",
-      "latest_record_type": "운동 세션 & 워치 GPS 경로",
-      "last_data_ts": 1761800000000,
-      "last_shared_ts": 1761870000000,
-      "csv_count": 24,
-      "json_count": 310,
-      "total_size_kb": 48200
-    }
-  ],
-  "local_recording_hashes": [
-    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-  ]
-}
-```
-
-#### 3) 응답 명세: `GET /api/v1/sync/manifest` 및 `POST /api/v1/sync/reconcile` (`SyncManifestResponse`)
-PC 서버는 `mobile/kakao/*.md`의 프론트매터(또는 DB)에 기록된 대화방별 마지막 대화 시각과 `mobile/health/`의 최신 헬스 기록, 그리고 이미 수신 완료한 녹음 해시 및 문자/통화/알림 동기화 상태를 반환합니다.
-
-```json
-{
-  "ok": true,
-  "last_kakao_ts": 1761870000000,
-  "last_sms_ts": 1761865000000,
-  "last_call_ts": 1761860000000,
-  "last_noti_ts": 1761869000000,
-  "last_recording_ts": 1761855000000,
-  "last_health_ts": 1761800000000,
-  "kakao_rooms": [
-    {
-      "room_name": "홍길동",
-      "folder_name": "KakaoTalk_Chats_2026-10-30_21.15.00",
-      "last_message": "2026년 10월 30일 오후 9:12, 홍길동 : 내일 뵙겠습니다.",
-      "last_message_ts": 1761826320000,
-      "last_shared_ts": 1761870000000,
-      "total_bytes": 15420000,
-      "synced_bytes": 15420000
-    }
-  ],
-  "health_records": [
-    {
-      "folder_name": "samsunghealth_iseohyun_20261030120000",
-      "latest_record_type": "운동 세션 & 워치 GPS 경로",
-      "last_data_ts": 1761800000000,
-      "last_shared_ts": 1761870000000,
-      "csv_count": 24,
-      "json_count": 310,
-      "total_size_kb": 48200
-    }
-  ],
-  "synced_recording_hashes": [
-    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-  ],
-  "synced_sms_ids": [],
-  "synced_call_ids": [],
-  "synced_noti_ids": []
-}
-```
-
----
-
-## 14. 🔄 최종 통합 동기화 프로토콜 명세 (v2.0 — 서버·클라이언트 공동 규격)
-
-> **목적**: 본 장은 `myLore Sync`(Android 클라이언트)와 `myLore`(PC 서버) 간에 확정된 **2대 동기화 조건(배터리 히스테리시스 포함)**, **세션 전송 계획(`session-plan`) 및 실시간 동적 증분 프로그레스 갱신**, **카테고리 우선순위 기반 Oldest-First 전송**, **통화기록+통화녹음 단일 이벤트 결합**, 그리고 **서버 주도 Background Check 및 `client_ack` 플래그 기반 상태 동기화(구 버전 누락 대화방 복원 및 미디어 증분 전송 최적화)**를 정의하는 최종 프로토콜 명세입니다.
-
----
-
-### 14.1 동기화 조건 (Sync Trigger & Retention Conditions)
-
-기존의 Wi-Fi SSID 일치 강제 조건을 제거하고, 아래 **2대 조건**으로 단순화합니다 (Wi-Fi 정보는 서버 미연결 시 자동 접속 유도 수단으로만 사용).
-
-| 조건 항목 | 진입(시작) 조건 | 유지(히스테리시스 하한선) 조건 | 중단(Pause) 동작 |
-| :--- | :--- | :--- | :--- |
-| **1. 배터리 상태** | **충전 중**(`CHARGING` / `FULL`) **OR** **배터리 잔량 $\ge$ 80%** | 비충전 상태더라도 **배터리 잔량 $\ge$ 75%** 까지는 현재 동기화 세션 유지 | 비충전 상태에서 배터리가 **75% 미만($<$ 75%)**으로 하락 시, 현재 업로드 중인 단일 파일/배치까지만 완료하고 즉시 일시정지 |
-| **2. 서버와의 연결** | `GET /api/v1/status` 응답 `200 OK` (`ok: true`) | 전송 중 서버 응답 정상 유지 | 네트워크 단절 또는 연속 타임아웃 발생 시 즉시 루프 중단 및 대기 전환 |
-
----
-
-### 14.2 전체 통신 프로토콜 시퀀스 (End-to-End Sequence)
-
-```mermaid
-sequenceDiagram
-    participant App as 📱 Android Client (myLore Sync)
-    participant Server as 💻 PC Server (myLore)
-    participant DB as 🗄️ Server DB (client_ack 관리)
-
-    Note over App,Server: [Phase 1] 서버 연결 및 동기화 조건 충족 (충전 중 or 배터리 >= 80%)
-    App->>Server: GET /api/v1/status (Header: X-MyLore-Token)
-    Server-->>App: 200 OK { ok: true, pc_name: "...", ... }
-
-    Note over App,Server: [Phase 2] 보낼 데이터의 크기 및 개수 전송 (선 캐시 즉시 발송 ➔ 후 스캔 갱신)
-    App->>Server: POST /api/v1/sync/session-plan (is_ready: false, 기존 파악된 대기 용량/개수 선발송)
-    App->>App: 백그라운드 정밀 스캔 (카톡 last_message_ts 이후 신규 미디어만 용량 합산)
-    App->>Server: POST /api/v1/sync/session-plan (is_ready: true, total_bytes: 100MB, total_count: 15, synced_bytes: 0)
-    Server-->>App: 200 OK (서버 프로그레스바 0MB / 100MB [15개] 초기화)
-
-    Note over App,Server: [Phase 3] 가장 오래된 내용(Oldest-First)부터 전송 시작
-    Note right of App: 순서: 경량(알림 ➔ 문자 ➔ 통화+통화녹음)<br/>➔ 대용량(카톡 ➔ 일반녹음 ➔ 헬스)
-    loop 각 카테고리 내부 가장 오래된(ASC) 항목부터 순차 전송
-        App->>Server: POST /api/v1/sync/{notifications | sms | call-logs+recordings | kakao | recordings | samsung-health}
-        Server->>DB: 데이터 저장 & 해당 도메인/대화방의 client_ack = false 리셋!
-        Server-->>App: 200 OK (클라이언트 synced_bytes 및 워터마크 전진)
-
-        opt 전송 도중(예: 30MB 전송 시점) 충전 중 새 이벤트(+10MB, +1개) 발생 시
-            App->>Server: POST /api/v1/sync/session-plan (total_bytes: 110MB, synced_bytes: 30MB, total_count: 16)
-            Server-->>App: 200 OK (서버 프로그레스바 30MB / 110MB [16개] 즉시 재조정)
-        end
-    end
-
-    Note over App,Server: [Phase 4] 더 이상 보낼 데이터 없음 전달 (Sync Complete)
-    App->>Server: POST /api/v1/sync/complete (클라이언트 보유 최신 시각 요약 포함)
-
-    Note over Server,DB: [Phase 5] 서버 Background Check 시작 (client_ack == false 대상 추출)
-    Server->>DB: client_ack == false 인 카톡 대화방 목록 및 5대 도메인 최신 시각 조회<br/>(과거 프로토콜로 전송되어 클라이언트가 존재조차 모르는 대화방 포함)
-    Server-->>App: 200 OK (SyncBackgroundCheckResponse: 미확인 대화방별 최신시각 & 도메인별 최신시각)
-
-    Note over App,Server: [Phase 6] 클라이언트 로컬 캐시 반영 및 ACK 전송
-    App->>App: 로컬 Room DB(kakao_room_cache 등)에 대화방 이름 & 최신 대화시각 저장<br/>(차후 내보내기 시 이 시각 이후의 사진/동영상만 전송하도록 최적화 활성화)
-    App->>Server: POST /api/v1/sync/ack (확인 완료한 대화방 목록 및 도메인별 최신 시각 ACK)
-    Server->>DB: 수신된 대화방 및 도메인의 client_ack = true 기록<br/>(차후 새 데이터로 갱신되기 전까지 Background Check 공유 생략)
-    Server-->>App: 200 OK { ok: true }
-```
-
----
-
-### 14.3 단계별 상세 프로토콜 규격
-
-#### Step 1 & Step 2: 보낼 데이터의 크기 및 개수 전송 (`POST /api/v1/sync/session-plan`)
-
-1. **선(先) 발송 · 후(後) 갱신 원칙**:
-   - 서버와 연결된 직후 아직 파일 해시나 폴더 스캔이 완료되지 않았다면, **기존 로컬 캐시에 파악되어 있는 미전송 데이터 기준으로 즉시 1차 전송(`"is_ready": false`)**합니다.
-   - 백그라운드 스캔이 완료되면 최종 계산된 용량과 개수로 **2차 갱신 전송(`"is_ready": true`)**합니다.
-
-2. **카테고리별 용량(`Bytes`) 및 볼륨 개수(`Count`) 산정 기준**:
-   - **세션 누적 기준**: 모든 용량과 개수는 **"이번 동기화 세션에서 전송해야 할 미전송(Pending) 총량"**과 **"이번 세션에서 전송 완료한 양"**을 기준으로 합니다.
-   - **총 데이터 크기 (`total_bytes`)**: 파일 기반 데이터인 **`카톡 + 통화녹음 + 일반녹음 + 헬스`의 바이트 총합**입니다. DB 레코드형 데이터(문자, 알림, 통화기록 텍스트)는 바이트 크기를 `0`으로 두어 건수(`count`)만 카운트합니다.
-
-| 카테고리 키 | 볼륨 개수 (`total_count`) 산정 기준 | 데이터 용량 (`total_bytes`) 산정 기준 | 비고 |
-| :--- | :--- | :--- | :--- |
-| **`kakao`** | 미전송 카톡 내보내기 **폴더(대화방) 개수** | `KakaoTalkChats.txt` 크기 + **전송 대상 신규 미디어 파일(`last_message_ts` 이후 파일)들의 바이트 합계** | 이미 알고 있는 `last_message_ts` 이전 미디어는 용량에서 제외 |
-| **`sms`** | 미전송 문자(SMS/MMS/RCS) **레코드 건수** | `0` (건수만 카운트) | DB형 데이터 |
-| **`notification`** | 미전송 알림 **레코드 건수** | `0` (건수만 카운트) | DB형 데이터 |
-| **`call`** | 미전송 **통화 이벤트(통화기록 + 매칭 통화녹음 결합) 건수** | 매칭된 미전송 **통화 녹음 오디오 파일들의 바이트 합계** (녹음 없는 통화는 `0B`) | 통화기록과 통화녹음을 1개 이벤트로 통합 카운트 |
-| **`recording`** | 미전송 **일반 음성 녹음 파일 개수** (통화녹음 제외) | 미전송 일반 음성 녹음 오디오 파일들의 바이트 합계 | `Voice Recorder`, 워치 음성메모 등 |
-| **`health`** | 미전송 헬스 폴더 내 **개별 파일(`.csv` + `.json`)의 총개수** | 전송 대상 `.csv` 및 `.json` 파일들의 바이트 합계 | 폴더 수가 아닌 개별 파일 수 |
-
-3. **전송 도중 새 이벤트 발생 시 동적 업데이트 (Dynamic Progress Adjustment)**:
-   - 동기화(충전 중) 도중 새로운 이벤트(새 문자/알림 수신, 새 통화+녹음 완료, 새 카톡 내보내기 감지 등)가 발생하면, 클라이언트는 기존 세션의 `total_bytes`와 `total_count`에 **추가된 데이터 크기와 개수를 더하여 `POST /api/v1/sync/session-plan`을 재호출**합니다.
-   - **예시**:
-     - 초기 계획: `total_bytes = 100MB`, `total_count = 15개`, `synced_bytes = 0MB`
-     - `30MB` 전송 중 `10MB (1개)` 새 이벤트 추가 발생
-     - 재전송 페이로드: `total_bytes = 110MB`, `synced_bytes = 30MB`, `total_count = 16개`
-     - 서버 UI 동작: 현재 프로그레스바를 즉시 **`30MB / 110MB (16개)`**로 갱신.
-
-4. **`POST /api/v1/sync/session-plan` JSON 페이로드 규격**:
-```json
-{
-  "session_id": "sess_1761880000000",
-  "is_ready": true,
-  "total_bytes": 115343360,
-  "synced_bytes": 31457280,
-  "total_count": 16,
-  "synced_count": 4,
-  "volumes": {
-    "kakao": { "total_count": 2, "synced_count": 0, "total_bytes": 95000000, "synced_bytes": 25000000 },
-    "sms": { "total_count": 5, "synced_count": 2, "total_bytes": 0, "synced_bytes": 0 },
-    "notification": { "total_count": 4, "synced_count": 2, "total_bytes": 0, "synced_bytes": 0 },
-    "call": { "total_count": 1, "synced_count": 0, "total_bytes": 10343360, "synced_bytes": 0 },
-    "recording": { "total_count": 1, "synced_count": 0, "total_bytes": 6457280, "synced_bytes": 6457280 },
-    "health": { "total_count": 3, "synced_count": 0, "total_bytes": 3542720, "synced_bytes": 0 }
-  }
-}
-```
-
----
-
-#### Step 3: 가장 오래된 내용부터 전송 시작 (Oldest-First & 도메인별 세부 규칙)
-
-1. **전송 우선순위 (방안 A)**:
-   - **1순위 (경량 실시간 데이터)**: `알림(Notification)` ➔ `문자(SMS/MMS)` ➔ `통화(통화기록 + 매칭 통화녹음)`
-   - **2순위 (대용량 파일 데이터)**: `카카오톡(KakaoTalk)` ➔ `일반 녹음(Voice Recordings)` ➔ `삼성 헬스(Samsung Health)`
-   - **각 카테고리 내부 정렬**: 반드시 **가장 오래된 데이터(`timestamp ASC`)**부터 순서대로 전송하며, 레코드 1건이 완료될 때마다 전송되지 않은 가장 오래된 데이터 기준점을 갱신합니다.
-
-2. **통화 기록 + 통화 녹음 단일 이벤트 처리 규칙**:
-   - **수집 분리**:
-     - **통화 녹음(`Call Recording`)**: `/sdcard/Recordings/Call`, `/sdcard/Recordings/TPhoneCallRecords`, `/sdcard/Call` 내 오디오 파일
-     - **일반 녹음(`Voice Recording`)**: `/sdcard/Recordings/Voice Recorder`, `/sdcard/Voice Recorder`, `/sdcard/Recordings/Sounds` (워치 메모 포함) 내 오디오 파일
-   - **매칭 및 완료 판정 (데드락 방지 포함)**:
-     - **최신 통화 60초 지연(Grace Period)**: 통화 종료 시각(`call.ts + call.durationSec * 1000`)으로부터 **60초가 지나지 않은 최신 통화**는 녹음 파일이 디스크에 생성 완료될 때까지 전송 및 완료 판정을 보류합니다.
-     - **Case A — 매칭되는 통화 녹음 파일이 단말에 존재하는 통화**:
-       전화번호(숫자 정규화)가 일치하고 녹음 시각이 `[call.ts - 10초 ~ call.ts + duration + 60초]` 범위 내에 있는 통화 녹음 파일이 존재하면, **① 통화 기록(`POST /api/v1/sync/call-logs`)과 ② 통화 녹음 파일(`POST /api/v1/sync/call-recordings`)이 모두 업로드 성공해야만** 해당 통화 이벤트를 완료 처리합니다.
-     - **Case B — 매칭되는 통화 녹음 파일이 없는 통화** (부재중 전화, 수신 거절, 미녹음 통화 등):
-       통화 종료 후 60초가 경과했음에도 매칭되는 통화 녹음 파일이 없으면, **통화 기록(`POST /api/v1/sync/call-logs`) 전송 성공 즉시 완료 처리**합니다.
-
-3. **카카오톡 대화방 최신 대화 시각(`last_message_ts`) 기반 미디어 증분 필터링**:
-   - 클라이언트가(로컬 캐시 또는 Step 5 서버 Background Check를 통해) 특정 대화방(`room_name`)의 서버 보유 최신 대화 시각(`last_message_ts`)을 알고 있는 경우:
-   - 해당 대화방의 내보내기 폴더를 전송할 때, 폴더 내 첨부 사진·동영상 중 **`mediaFile.lastModified() > last_message_ts`인 신규 미디어 파일만** 해시 계산 및 업로드를 수행하고, `last_message_ts` 이전의 과거 미디어 파일은 이미 공유된 것으로 간주하여 스킵합니다.
-
----
-
-#### Step 4 & Step 5: Sync 완료 통보, 서버 Background Check 및 `client_ack` 플래그 프로토콜
-
-> **핵심 설계 배경 (구 프로토콜 누락 복원 및 전송 효율 극대화)**:  
-> 이전 통신 프로토콜에서는 클라이언트가 서버로 카톡 채팅 정보를 전송한 뒤 폴더를 삭제하면서 로컬에 전송 기록을 남기지 않았기 때문에, **클라이언트가 과거에 보낸 대화방의 존재 자체나 최신 대화 시각을 모르고 있을 수 있습니다.**  
-> 클라이언트가 존재조차 모르는 대화방은 클라이언트가 먼저 요청할 수 없으므로, **서버가 자신이 보유한 각 대화방 및 도메인 데이터의 `client_ack` 플래그를 검사하여 `client_ack == false`인 항목을 먼저 클라이언트에게 내려주고, 클라이언트로부터 `ACK`를 받으면 서버 DB에 `client_ack = true`를 기록**하는 방식으로 동작해야 합니다.
-
-##### 1) 서버 DB의 `client_ack` 플래그 상태 머신 (Server-Side State Machine)
-
-서버는 아래 6개 도메인 테이블(또는 메타데이터 스토어)에 각각 **`client_ack` (`BOOLEAN DEFAULT FALSE`)** 플래그를 관리합니다:
-
-| 도메인 | 서버가 관리하는 최신 상태 정보 | `client_ack = false`로 설정(리셋)되는 시점 | `client_ack = true`로 설정되는 시점 |
-| :--- | :--- | :--- | :--- |
-| **1. 카톡 대화방별**<br>(`kakao_rooms`) | 대화방 이름(`room_name`), 최신 대화 시각(`last_message_ts`), 마지막 대화 요약(`last_message`), 누적 용량(`total_bytes`) | • **최초 DB 마이그레이션 시 기존 보유 모든 대화방 (`false`)**<br>• 클라이언트가 해당 대화방의 새 대화/미디어를 업로드하여 최신 시각이 갱신된 직후 | 클라이언트가 `POST /api/v1/sync/ack`로 해당 `room_name`과 `last_message_ts`를 확인 응답했을 때 |
-| **2. 알림**<br>(`notification`) | 서버가 전송받은 알림 목록의 최신 이벤트 시각 (`last_noti_ts`) | • 최초 초기값 (`false`)<br>• 새 알림이 업로드되어 `last_noti_ts`가 갱신된 직후 | 클라이언트가 해당 `last_noti_ts`에 대해 `ACK`를 보냈을 때 |
-| **3. 문자**<br>(`sms`) | 서버가 전송받은 문자 목록의 최신 이벤트 시각 (`last_sms_ts`) | • 최초 초기값 (`false`)<br>• 새 문자가 업로드되어 `last_sms_ts`가 갱신된 직후 | 클라이언트가 해당 `last_sms_ts`에 대해 `ACK`를 보냈을 때 |
-| **4. 통화 (기록+녹음)**<br>(`call`) | 통화기록과 (존재 시) 통화녹음이 모두 전송 완료된 최신 통화 시각 (`last_call_ts`) | • 최초 초기값 (`false`)<br>• 새 통화 이벤트(기록+녹음)가 완료되어 `last_call_ts`가 갱신된 직후 | 클라이언트가 해당 `last_call_ts`에 대해 `ACK`를 보냈을 때 |
-| **5. 일반 녹음**<br>(`recording`) | 일반 음성 녹음 목록의 최신 녹음 시각 (`last_recording_ts`) 및 신규 수신 파일 해시 목록 | • 최초 초기값 (`false`)<br>• 새 일반 녹음 파일이 업로드되어 `last_recording_ts`가 갱신된 직후 | 클라이언트가 해당 `last_recording_ts`에 대해 `ACK`를 보냈을 때 |
-| **6. 삼성 헬스**<br>(`health`) | 서버에 현존하는 최신 로그 기록(`.csv`/`.json`)을 참고하여 추출한 최신 데이터 시각 (`last_health_ts`) 및 최신 종목(`latest_record_type`) | • 최초 초기값 (`false`)<br>• 새 헬스 파일이 업로드되어 `last_health_ts`가 갱신된 직후 | 클라이언트가 해당 `last_health_ts`에 대해 `ACK`를 보냈을 때 |
-
-##### 2) API 1: 클라이언트의 Sync 완료 선언 및 서버 Background Check 결과 수신 (`POST /api/v1/sync/complete`)
-
-클라이언트가 Step 3에서 더 이상 보낼 데이터가 없을 때 호출합니다. 서버는 즉시 Background Check를 수행하여 **현재 서버 DB에서 `client_ack == false`인 모든 항목**과, (필요시) 클라이언트-서버 대조 결과 누락된 역방향 재전송 요청(`rewind_watermarks`)을 응답합니다.
-
-- **Request (`POST /api/v1/sync/complete`)**:
-```json
-{
-  "session_id": "sess_1761880000000",
-  "client_latest": {
-    "last_kakao_ts": 1761870000000,
-    "last_noti_ts": 1761869000000,
-    "last_sms_ts": 1761865000000,
-    "last_call_ts": 1761860000000,
-    "last_recording_ts": 1761855000000,
-    "last_health_ts": 1761800000000
-  }
-}
-```
-
-- **Response (`SyncCompleteResponse` — 서버의 Background Check 결과)**:
-  - `unacked_kakao_rooms`: 서버 DB에서 `client_ack == false`인 대화방 목록 (과거에 전송되어 클라이언트가 존재를 모르는 대화방들도 최초에는 모두 `client_ack == false`이므로 이 배열을 통해 클라이언트에게 빠짐없이 전달됨).
-  - `unacked_domains`: 서버 DB에서 `client_ack == false`인 도메인들의 최신 이벤트 시각 (이미 `client_ack == true`이고 그 이후 갱신이 없었던 도메인은 `null` 또는 생략되어 불필요한 체크를 하지 않음).
-```json
-{
-  "ok": true,
-  "has_unacked_updates": true,
-  "unacked_kakao_rooms": [
-    {
-      "room_name": "홍길동",
-      "folder_name": "KakaoTalk_Chats_2026-10-30_21.15.00",
-      "last_message": "내일 뵙겠습니다.",
-      "last_message_ts": 1761826320000,
-      "last_shared_ts": 1761870000000,
-      "total_bytes": 15420000,
-      "synced_bytes": 15420000
-    },
-    {
-      "room_name": "가족 단톡방",
-      "folder_name": "KakaoTalk_Chats_2026-09-15_10.00.00",
-      "last_message": "추석 때 봐요!",
-      "last_message_ts": 1757898000000,
-      "last_shared_ts": 1757900000000,
-      "total_bytes": 128000000,
-      "synced_bytes": 128000000
-    }
-  ],
-  "unacked_domains": {
-    "notification": { "latest_ts": 1761869000000 },
-    "sms": { "latest_ts": 1761865000000 },
-    "call": { "latest_ts": 1761860000000 },
-    "recording": {
-      "latest_ts": 1761855000000,
-      "synced_hashes": ["e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"]
-    },
-    "health": {
-      "latest_ts": 1761800000000,
-      "latest_record_type": "운동 세션 & 워치 GPS 경로",
-      "folder_name": "samsunghealth_iseohyun_20261030120000"
-    }
-  }
-}
-```
-
-##### 3) API 2: 클라이언트의 로컬 DB 반영 후 ACK 확정 전송 (`POST /api/v1/sync/ack`)
-
-클라이언트는 `unacked_kakao_rooms`와 `unacked_domains`를 수신하는 즉시 로컬 Room DB(`kakao_room_cache`, `health_sync_cache`, `sms_cache`, `call_log_cache`, `recording_cache`, `notifications`)와 `AppPreferences`에 최신 시각을 기록한 뒤, 아래 `ACK` 요청을 서버로 보냅니다.
-
-- **Request (`POST /api/v1/sync/ack`)**:
-```json
-{
-  "acked_kakao_rooms": [
-    { "room_name": "홍길동", "last_message_ts": 1761826320000 },
-    { "room_name": "가족 단톡방", "last_message_ts": 1757898000000 }
-  ],
-  "acked_domains": {
-    "notification": 1761869000000,
-    "sms": 1761865000000,
-    "call": 1761860000000,
-    "recording": 1761855000000,
-    "health": 1761800000000
-  }
-}
-```
-
-- **Server Action & Response**:
-  - 서버는 `acked_kakao_rooms`에 포함된 각 대화방의 현재 `last_message_ts`가 클라이언트가 확인한 `last_message_ts`와 일치하면 **`client_ack = true`**로 DB에 저장합니다.
-  - 서버는 `acked_domains`에 포함된 각 도메인의 현재 최신 시각이 클라이언트가 확인한 시각과 일치하면 해당 도메인의 **`client_ack = true`**로 DB에 저장합니다.
-  - 이후 새로운 데이터가 들어와 해당 대화방이나 도메인의 최신 시각이 변경되면 서버는 즉시 **`client_ack = false`로 플래그를 삭제(초기화)**하고 다음 Background Check에서 다시 공유하며, 변경이 없으면 `client_ack == true`이므로 체크하지 않고 건너뜁니다.
-```json
-{
-  "ok": true,
-  "acked_room_count": 2,
-  "acked_domain_count": 5
-}
-```
-
+## 6. 배포 방식 및 단계별 개발 마일스톤
+
+### 6.1 배포 방식 요약
+| 설치 방식 | 장점 | 비고 |
+| :--- | :--- | :--- |
+| **방식 1: Android Studio / ADB 직접 설치** | 비용 $0, 심사 제약 없이 `SMS`, `통화기록`, `모든 파일 접근`, `알림` 권한 100% 자유 사용 | 개인용/개발용 최우선 권장 |
+| **방식 2: Google Play Console `내부 테스트(Internal Testing)`** | 12명/14일 테스트 의무 면제, 정식 스토어 경로 설치로 Android 13+ '제한된 설정' 차단 자동 우회 | 계정 등록비 $25, 민감한 권한 선언서 제출 필요 |
+
+### 6.2 개발 마일스톤 현황
+- [x] **Phase 1**: 패키지 정제(`com.iseohyun.mylore.sync`), 의존성 구축, 로컬 Room DB / DataStore / Retrofit 레이어 구현 (`완료`)
+- [x] **Phase 2**: QR 스캐너(`myloresync://pair` 딥링크 및 방식 A Wi-Fi 자동 등록) & 수집기(알림, 문자/MMS, 통화, 통화녹음, 연락처, 앱사용량, 카톡, 삼성헬스) 구현 (`완료`)
+- [x] **Phase 3**: v2.0 통합 동기화 엔진(`SyncConditionMonitor` 2대 조건, `session-plan`, Oldest-First, `complete`/`ack` 상태 머신) 구현 (`완료`)
+- [x] **Phase 4**: 스마트 명함 스캐너(ML Kit 누적 투표 + Document Scanner + 회전 보정 + 클라우드 계정 바인딩) 구현 (`완료`)
+- [x] **Phase 5**: 10대 카테고리 좌측 오버레이 드로어 UI, Sticky Header 표 전면 개편(카톡/문자/통화[T전화녹음 통합]/알림/음성녹음/사진[5대 폴더]), 비파괴 DB 마이그레이션(`AppDatabase` v5) 완료 (`완료`)
+- [x] **Phase 6**: 기술 명세서 3분할 체계화 (`MYLORE_SYNC_SPEC.md`, `MYLORE_SYNC_UI_SPEC.md`, `MYLORE_SYNC_COMM_SPEC.md`) (`완료`)

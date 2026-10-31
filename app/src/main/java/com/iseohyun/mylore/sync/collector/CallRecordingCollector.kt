@@ -4,6 +4,7 @@ import android.os.Environment
 import android.util.Log
 import com.iseohyun.mylore.sync.data.local.AppDatabase
 import com.iseohyun.mylore.sync.data.local.entity.RecordingCacheEntity
+import com.iseohyun.mylore.sync.data.prefs.AppPreferences
 import java.io.File
 import java.io.FileInputStream
 import java.security.MessageDigest
@@ -23,7 +24,94 @@ class CallRecordingCollector {
 
     companion object {
         private const val TAG = "CallRecordCollector"
-        private val AUDIO_EXTENSIONS = setOf("m4a", "amr", "mp3", "wav")
+        private val AUDIO_EXTENSIONS = setOf("m4a", "amr", "mp3", "wav", "3gp", "aac", "ogg", "flac", "mp4")
+
+        /**
+         * 통화/음성 녹음 탐색을 위한 기본 후보(참고) 폴더 리스트입니다.
+         * 하드코딩된 직접 호출 대신 이 후보 리스트를 기준으로 앱 초기화 시 실제 존재 여부를 검증하여
+         * 존재하는 폴더만 활성 조회 폴더(activeDirectories)로 지정합니다.
+         */
+        val DEFAULT_CANDIDATE_PATHS = listOf(
+            "Recordings/Call",
+            "Recordings/TPhoneCallRecords",
+            "recordings/TPhoneCallRecords",
+            "recordings/Call",
+            "Recordings/Voice Recorder",
+            "Recordings/Sounds",
+            "TPhoneCallRecords",
+            "Call",
+            "Voice Recorder",
+            "Sounds",
+            "Music/TPhoneCallRecords"
+        )
+
+        @Volatile
+        private var activeDirectories: List<File> = emptyList()
+
+        /**
+         * 애플리케이션 초기 실행 시(또는 설정 갱신 시) 후보 폴더 리스트를 순회하여
+         * 기기에 실제 존재하는 폴더만 기본 조회 폴더(Active Scan Directories)로 지정하고 유지합니다.
+         */
+        suspend fun initializeActiveDirectories(prefs: AppPreferences? = null): List<File> {
+            val candidatePaths = prefs?.getOrInitCandidateRecordingDirs(DEFAULT_CANDIDATE_PATHS)
+                ?: DEFAULT_CANDIDATE_PATHS.toSet()
+
+            val verifiedDirs = probeExistingCandidateDirs(candidatePaths)
+            activeDirectories = verifiedDirs
+            prefs?.saveActiveRecordingDirs(verifiedDirs.map { it.absolutePath }.toSet())
+            Log.i(TAG, "Active recording directories initialized (${verifiedDirs.size}): ${verifiedDirs.map { it.absolutePath }}")
+            return verifiedDirs
+        }
+
+        /**
+         * 현재 지정된 기본 조회 폴더 목록을 반환합니다.
+         * 아직 초기화되지 않았거나 비어 있으면 후보 리스트에서 즉시 존재 여부를 확인해 지정합니다.
+         */
+        fun getActiveDirectories(): List<File> {
+            val current = activeDirectories.filter { it.exists() && it.isDirectory }
+            if (current.isNotEmpty()) {
+                return current
+            }
+            val probed = probeExistingCandidateDirs(DEFAULT_CANDIDATE_PATHS.toSet())
+            activeDirectories = probed
+            return probed
+        }
+
+        private fun probeExistingCandidateDirs(candidatePaths: Set<String>): List<File> {
+            val root = Environment.getExternalStorageDirectory()
+            val deduplicated = LinkedHashMap<String, File>()
+
+            fun registerIfValid(dir: File) {
+                if (!dir.exists() || !dir.isDirectory) return
+                // Android 내장 스토리지(FUSE/sdcardfs)는 대소문자를 구분하지 않으므로
+                // canonicalPath 및 소문자 경로 기준으로 중복 스캔을 방지합니다.
+                val key = try {
+                    dir.canonicalPath.lowercase(Locale.ROOT)
+                } catch (_: Exception) {
+                    dir.absolutePath.lowercase(Locale.ROOT)
+                }
+                deduplicated.putIfAbsent(key, dir)
+            }
+
+            for (rawPath in candidatePaths) {
+                val trimmed = rawPath.trim()
+                if (trimmed.isEmpty()) continue
+                val dir = if (trimmed.startsWith("/")) File(trimmed) else File(root, trimmed)
+                registerIfValid(dir)
+            }
+
+            // 내장 저장공간의 Recordings / recordings 루트 직하위에 존재하는 하위 폴더(예: TPhoneCallRecords 등)도 자동 탐색
+            for (recRootName in listOf("Recordings", "recordings")) {
+                val recRoot = File(root, recRootName)
+                if (recRoot.exists() && recRoot.isDirectory) {
+                    recRoot.listFiles { f -> f.isDirectory }?.forEach { subDir ->
+                        registerIfValid(subDir)
+                    }
+                }
+            }
+
+            return deduplicated.values.toList()
+        }
 
         /**
          * 통화 녹음 파일인지 일반 음성 녹음(Voice Recorder, 워치 음성메모 등)인지 판별합니다.
@@ -43,7 +131,8 @@ class CallRecordingCollector {
             }
 
             if (pathLower.contains("/recordings/call") ||
-                pathLower.contains("/tphonecallrecords") ||
+                pathLower.contains("tphonecallrecords") ||
+                parentLower.equals("tphonecallrecords", ignoreCase = true) ||
                 parentLower == "call" ||
                 nameLower.startsWith("#") ||
                 nameLower.contains("통화 녹음") ||
@@ -92,28 +181,36 @@ class CallRecordingCollector {
         }
     }
 
-    private fun getCandidateDirs(): List<File> = listOf(
-        File(Environment.getExternalStorageDirectory(), "Recordings/Call"),
-        File(Environment.getExternalStorageDirectory(), "Recordings/TPhoneCallRecords"),
-        File(Environment.getExternalStorageDirectory(), "Recordings/Voice Recorder"),
-        File(Environment.getExternalStorageDirectory(), "Recordings/Sounds"),
-        File(Environment.getExternalStorageDirectory(), "Call"),
-        File(Environment.getExternalStorageDirectory(), "Voice Recorder")
-    )
-
     /**
      * Room DB의 `recording_cache`를 활용하여 기존 파일의 SHA-256 재계산을 완전히 생략하고
-     * 새로 추가되거나 변경된 녹음 파일만 증분 스캔합니다.
+     * 기본 조회 폴더(activeDirectories) 내 새로 추가되거나 변경된 녹음 파일만 증분 스캔합니다.
+     *
+     * 중요: 녹음 파일은 여러 폴더(Call, TPhoneCallRecords 등)에 분산 저장되므로
+     * 단순 시각(`recordedAt <= lastRecordingTs`)으로 완료 처리하지 않고,
+     * 오직 파일 해시(`SHA-256`) 기반 서버 대조 및 업로드 성공 여부로만 `isSynced`를 관리합니다.
      */
     suspend fun refreshRecordingsCache(
         db: AppDatabase,
-        lastRecordingTs: Long = 0L
+        @Suppress("UNUSED_PARAMETER") lastRecordingTs: Long = 0L,
+        prefs: AppPreferences? = null
     ): List<RecordingCacheEntity> {
         val dao = db.syncCacheDao()
+
+        // 과거 워터마크 비교 버그로 인해 미전송 파일(예: TPhoneCallRecords)이 isSynced=true로 잘못 마킹된 경우 1회 리셋
+        if (prefs != null && prefs.consumeRecordingHashOnlyResetNeeded()) {
+            dao.resetAllRecordingsSyncedState()
+        }
+
+        val scanDirs = if (prefs != null) {
+            initializeActiveDirectories(prefs)
+        } else {
+            getActiveDirectories()
+        }
+
         val existingMap = dao.getAllRecordings().associateBy { it.filePath }
 
         val discoveredFiles = mutableListOf<File>()
-        for (dir in getCandidateDirs()) {
+        for (dir in scanDirs) {
             collectAudioFilesRecursively(dir, discoveredFiles)
         }
 
@@ -130,12 +227,25 @@ class CallRecordingCollector {
             existingPaths.add(path)
             val length = file.length()
             val lastMod = file.lastModified()
+            val logicalFolder = resolveLogicalFolderName(file)
 
             val cached = existingMap[path]
             if (cached != null && cached.fileSize == length && cached.lastModified == lastMod && cached.fileHash.isNotBlank()) {
-                // 이미 캐시된 파일: 워터마크 기준으로 동기화 상태가 새로 완료되었으면 업데이트
-                if (!cached.isSynced && lastRecordingTs > 0L && cached.recordedAt <= lastRecordingTs) {
-                    newlyScanned.add(cached.copy(isSynced = true))
+                val (phone, name, time) = parseRecordingMeta(file)
+                // 폴더명이나 파일명 메타데이터(이름/전화번호/녹음시각)가 보정되었으면 해시 재계산 없이 메타만 업데이트
+                if (cached.parentFolderName != logicalFolder ||
+                    cached.phoneNumber != phone ||
+                    cached.contactName != name ||
+                    cached.recordedAt != time
+                ) {
+                    newlyScanned.add(
+                        cached.copy(
+                            parentFolderName = logicalFolder,
+                            phoneNumber = phone,
+                            contactName = name,
+                            recordedAt = time
+                        )
+                    )
                 }
                 continue
             }
@@ -143,19 +253,23 @@ class CallRecordingCollector {
             try {
                 val hash = computeSha256(file)
                 val (phone, name, time) = parseRecordingMeta(file)
-                val isSynced = cached?.isSynced == true || (lastRecordingTs > 0L && time <= lastRecordingTs)
+                val isSynced = cached?.isSynced == true
+                val syncedAt = if (isSynced) {
+                    cached?.syncedAt?.takeIf { it > 0L } ?: System.currentTimeMillis()
+                } else 0L
                 newlyScanned.add(
                     RecordingCacheEntity(
                         filePath = path,
                         fileName = file.name,
-                        parentFolderName = file.parentFile?.name ?: "",
+                        parentFolderName = logicalFolder,
                         fileSize = length,
                         lastModified = lastMod,
                         fileHash = hash,
                         phoneNumber = phone,
                         contactName = name,
                         recordedAt = time,
-                        isSynced = isSynced
+                        isSynced = isSynced,
+                        syncedAt = syncedAt
                     )
                 )
             } catch (e: Exception) {
@@ -167,19 +281,29 @@ class CallRecordingCollector {
             dao.upsertRecordings(newlyScanned)
         }
         dao.removeDeletedRecordings(existingPaths)
+        dao.backfillMissingRecordingSyncedAt(System.currentTimeMillis())
 
         return dao.getAllRecordings()
     }
 
     /**
-     * 통화 녹음 및 음성 메모 폴더들을 탐색하여 유효한 음성 녹음 파일 목록을 최신순(내림차순)으로 반환합니다.
+     * 기본 조회 폴더(activeDirectories)들을 탐색하여 유효한 음성 녹음 파일 목록을 최신순(내림차순)으로 반환합니다.
      */
     fun scanCallRecordings(): List<CallRecordingInfo> {
         val results = mutableListOf<CallRecordingInfo>()
-        for (dir in getCandidateDirs()) {
+        for (dir in getActiveDirectories()) {
             scanDirectoryRecursively(dir, results)
         }
         return results.sortedByDescending { it.recordedAt }
+    }
+
+    private fun resolveLogicalFolderName(file: File): String {
+        val pathLower = file.absolutePath.lowercase(Locale.ROOT)
+        return when {
+            pathLower.contains("tphonecallrecords") -> "TPhoneCallRecords"
+            pathLower.contains("voice recorder") -> "Voice Recorder"
+            else -> file.parentFile?.name ?: ""
+        }
     }
 
     private fun collectAudioFilesRecursively(dir: File, outFiles: MutableList<File>) {
@@ -226,20 +350,31 @@ class CallRecordingCollector {
         var name = ""
         var timestamp = file.lastModified()
 
-        // 1. T전화 포맷: #이름_전화번호_YYYYMMDDHHMMSS (예: #거제해양윤주권차장님_01066067048_20261023122434)
-        if (nameWithoutExt.startsWith("#")) {
+        // 1. T전화/에이닷 전화 포맷:
+        //    - #이름_전화번호_YYYYMMDDHHMMSS (예: #거제해양윤주권차장님_01066067048_20261023122434)
+        //    - 이름_전화번호_YYYYMMDDHHMMSS 또는 전화번호_YYYYMMDDHHMMSS
+        val tPhone14DigitRegex = Regex("""(20\d{12})""")
+        val tPhoneDateMatch = tPhone14DigitRegex.find(nameWithoutExt)
+        if (nameWithoutExt.startsWith("#") || tPhoneDateMatch != null) {
             val trimmed = nameWithoutExt.removePrefix("#")
-            val parts = trimmed.split("_")
-            if (parts.size >= 3) {
-                name = parts[0]
-                phone = parts[1].filter { it.isDigit() }
-                val datePart = parts[2]
-                if (datePart.length >= 14 && datePart.all { it.isDigit() }) {
-                    try {
-                        val sdf = SimpleDateFormat("yyyyMMddHHmmss", Locale.KOREA)
-                        timestamp = sdf.parse(datePart.substring(0, 14))?.time ?: timestamp
-                    } catch (_: Exception) {}
+            val parts = trimmed.split("_").filter { it.isNotBlank() }
+            if (tPhoneDateMatch != null) {
+                try {
+                    val sdf = SimpleDateFormat("yyyyMMddHHmmss", Locale.KOREA)
+                    timestamp = sdf.parse(tPhoneDateMatch.groupValues[1])?.time ?: timestamp
+                } catch (_: Exception) {}
+            }
+            for (part in parts) {
+                val digits = part.filter { it.isDigit() }
+                if (tPhoneDateMatch != null && part.contains(tPhoneDateMatch.groupValues[1])) {
+                    continue
+                } else if (digits.startsWith("010") || digits.startsWith("02") || digits.length in 8..12) {
+                    if (phone.isEmpty()) phone = digits
+                } else if (part !in listOf("통화 녹음", "Call", "통화녹음", "TPhoneCallRecords") && name.isEmpty()) {
+                    name = part
                 }
+            }
+            if (nameWithoutExt.startsWith("#") || phone.isNotEmpty() || name.isNotEmpty()) {
                 return Triple(phone, name, timestamp)
             }
         }
@@ -270,20 +405,34 @@ class CallRecordingCollector {
             return Triple(phone, name, timestamp)
         }
 
-        // 4. 삼성 일반 통화 녹음 포맷: 통화 녹음_이름_전화번호_YYMMDD_HHMMSS 또는 통화 녹음_전화번호_YYMMDD_HHMMSS
+        // 4. 삼성 일반 통화 녹음 포맷: 통화 녹음_이름_전화번호_YYMMDD_HHMMSS 또는 YYYYMMDD_HHMMSS
+        val dateTimePairRegex = Regex("""(\d{6,8})[_-](\d{6})$""")
+        val dtMatch = dateTimePairRegex.find(nameWithoutExt)
+        if (dtMatch != null) {
+            val dPart = dtMatch.groupValues[1]
+            val tPart = dtMatch.groupValues[2]
+            try {
+                val pattern = if (dPart.length == 6) "yyMMddHHmmss" else "yyyyMMddHHmmss"
+                val sdf = SimpleDateFormat(pattern, Locale.KOREA)
+                timestamp = sdf.parse(dPart + tPart)?.time ?: timestamp
+            } catch (_: Exception) {}
+        }
+
         val parts = nameWithoutExt.split("_")
         for (part in parts) {
             val digits = part.filter { it.isDigit() }
-            if (digits.startsWith("010") || digits.length in 9..11) {
+            if (dtMatch != null && (part == dtMatch.groupValues[1] || part == dtMatch.groupValues[2])) {
+                continue
+            } else if (digits.startsWith("010") || digits.length in 9..11) {
                 phone = digits
-            } else if (part.length in 6..8 && part.all { it.isDigit() }) {
+            } else if (dtMatch == null && part.length in 6..8 && part.all { it.isDigit() }) {
                 try {
                     val pattern = if (part.length == 6) "yyMMdd" else "yyyyMMdd"
                     val sdf = SimpleDateFormat(pattern, Locale.KOREA)
                     timestamp = sdf.parse(part)?.time ?: timestamp
                 } catch (_: Exception) {}
-            } else if (part !in listOf("통화 녹음", "Call", "통화녹음") && part.length in 2..15) {
-                name = part
+            } else if (part !in listOf("통화 녹음", "Call", "통화녹음") && part.length in 1..20) {
+                if (name.isEmpty()) name = part
             }
         }
 

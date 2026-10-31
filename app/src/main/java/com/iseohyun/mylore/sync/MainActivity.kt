@@ -17,6 +17,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.lifecycleScope
+import com.iseohyun.mylore.sync.collector.CallRecordingCollector
 import com.iseohyun.mylore.sync.data.prefs.AppPreferences
 import com.iseohyun.mylore.sync.data.remote.dto.PairingQrData
 import com.iseohyun.mylore.sync.ui.dashboard.DashboardScreen
@@ -24,6 +25,8 @@ import com.iseohyun.mylore.sync.ui.onboarding.OnboardingScreen
 import com.iseohyun.mylore.sync.ui.onboarding.executeQrPairingPipeline
 import com.iseohyun.mylore.sync.ui.settings.SettingsScreen
 import com.iseohyun.mylore.sync.ui.theme.MyLoreSyncTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -32,13 +35,30 @@ class MainActivity : ComponentActivity() {
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { _ -> }
+    ) { _ ->
+        lifecycleScope.launch(Dispatchers.IO) {
+            CallRecordingCollector.initializeActiveDirectories(appPreferences)
+            com.iseohyun.mylore.sync.collector.PhotoMediaCollector.initializeActiveDirectories(appPreferences)
+            if (appPreferences.isPaired.first()) {
+                com.iseohyun.mylore.sync.engine.RealtimeSyncForegroundService.startService(applicationContext)
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
         appPreferences = AppPreferences(applicationContext)
+
+        // 앱 초기 실행 시 후보 녹음/사진 폴더 리스트 중 실제 존재하는 폴더를 확인하여 기본 조회 폴더로 지정
+        lifecycleScope.launch(Dispatchers.IO) {
+            CallRecordingCollector.initializeActiveDirectories(appPreferences)
+            com.iseohyun.mylore.sync.collector.PhotoMediaCollector.initializeActiveDirectories(appPreferences)
+            if (appPreferences.isPaired.first()) {
+                com.iseohyun.mylore.sync.engine.RealtimeSyncForegroundService.startService(applicationContext)
+            }
+        }
 
         requestRequiredPermissions()
         handleDeepLinkIntent(intent)
@@ -131,11 +151,17 @@ class MainActivity : ComponentActivity() {
             Manifest.permission.RECEIVE_SMS,
             Manifest.permission.READ_CALL_LOG,
             Manifest.permission.READ_PHONE_STATE,
+            Manifest.permission.READ_CONTACTS,
+            Manifest.permission.WRITE_CONTACTS,
             Manifest.permission.CAMERA
         )
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             permissions.add(Manifest.permission.POST_NOTIFICATIONS)
+            permissions.add(Manifest.permission.READ_MEDIA_IMAGES)
+            permissions.add(Manifest.permission.READ_MEDIA_VIDEO)
+        } else {
+            permissions.add(Manifest.permission.READ_EXTERNAL_STORAGE)
         }
 
         permissionLauncher.launch(permissions.toTypedArray())

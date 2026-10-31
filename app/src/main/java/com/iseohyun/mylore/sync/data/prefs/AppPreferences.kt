@@ -35,8 +35,16 @@ class AppPreferences(private val context: Context) {
         private val KEY_LAST_NOTI_TS = longPreferencesKey("last_noti_ts")
         private val KEY_LAST_RECORDING_TS = longPreferencesKey("last_recording_ts")
         private val KEY_LAST_HEALTH_TS = longPreferencesKey("last_health_ts")
+        private val KEY_LAST_PHOTO_TS = longPreferencesKey("last_photo_ts")
         private val KEY_LAST_CONTACT_TS = longPreferencesKey("last_contact_ts")
         private val KEY_LAST_USAGE_TS = longPreferencesKey("last_usage_ts")
+
+        private val KEY_CANDIDATE_RECORDING_DIRS = stringSetPreferencesKey("candidate_recording_dirs")
+        private val KEY_ACTIVE_RECORDING_DIRS = stringSetPreferencesKey("active_recording_dirs")
+        private val KEY_RECORDING_HASH_ONLY_RESET_V2 = booleanPreferencesKey("recording_hash_only_reset_v2")
+
+        private val KEY_CANDIDATE_PHOTO_DIRS = stringSetPreferencesKey("candidate_photo_dirs")
+        private val KEY_ACTIVE_PHOTO_DIRS = stringSetPreferencesKey("active_photo_dirs")
 
         const val DEFAULT_PORT = 18443
     }
@@ -91,6 +99,10 @@ class AppPreferences(private val context: Context) {
 
     val lastHealthTs: Flow<Long> = context.dataStore.data.map { prefs ->
         prefs[KEY_LAST_HEALTH_TS] ?: 0L
+    }
+
+    val lastPhotoTs: Flow<Long> = context.dataStore.data.map { prefs ->
+        prefs[KEY_LAST_PHOTO_TS] ?: 0L
     }
 
     val lastContactTs: Flow<Long> = context.dataStore.data.map { prefs ->
@@ -215,6 +227,12 @@ class AppPreferences(private val context: Context) {
         }
     }
 
+    suspend fun updateLastPhotoTs(ts: Long) {
+        context.dataStore.edit { prefs ->
+            prefs[KEY_LAST_PHOTO_TS] = maxOf(prefs[KEY_LAST_PHOTO_TS] ?: 0L, ts)
+        }
+    }
+
     suspend fun updateLastContactTs(ts: Long) {
         context.dataStore.edit { prefs ->
             prefs[KEY_LAST_CONTACT_TS] = maxOf(prefs[KEY_LAST_CONTACT_TS] ?: 0L, ts)
@@ -243,6 +261,7 @@ class AppPreferences(private val context: Context) {
                 prefs[KEY_LAST_NOTI_TS] = 0L
                 prefs[KEY_LAST_RECORDING_TS] = 0L
                 prefs[KEY_LAST_HEALTH_TS] = 0L
+                prefs[KEY_LAST_PHOTO_TS] = 0L
                 prefs[KEY_LAST_CONTACT_TS] = 0L
                 prefs[KEY_LAST_USAGE_TS] = 0L
             } else {
@@ -256,6 +275,96 @@ class AppPreferences(private val context: Context) {
                 prefs[KEY_LAST_USAGE_TS] = maxOf(prefs[KEY_LAST_USAGE_TS] ?: 0L, status.lastUsageTs)
             }
         }
+    }
+
+    /**
+     * 통화/음성 녹음 탐색을 위한 후보(참고) 폴더 경로 목록을 반환합니다.
+     * 저장된 후보 목록이 없으면 기본 후보 목록으로 초기화하여 저장합니다.
+     */
+    suspend fun getOrInitCandidateRecordingDirs(defaultCandidates: List<String>): Set<String> {
+        val prefs = context.dataStore.data.first()
+        val stored = prefs[KEY_CANDIDATE_RECORDING_DIRS]
+        if (!stored.isNullOrEmpty()) {
+            // 새로 추가된 기본 후보가 있으면 병합
+            val merged = stored + defaultCandidates
+            if (merged.size != stored.size) {
+                context.dataStore.edit { it[KEY_CANDIDATE_RECORDING_DIRS] = merged }
+            }
+            return merged
+        }
+        val initialSet = defaultCandidates.toSet()
+        context.dataStore.edit { it[KEY_CANDIDATE_RECORDING_DIRS] = initialSet }
+        return initialSet
+    }
+
+    /**
+     * 후보 폴더 목록에 새로운 상대/절대 경로를 추가합니다.
+     */
+    suspend fun addCandidateRecordingDir(path: String) {
+        if (path.isBlank()) return
+        context.dataStore.edit { prefs ->
+            val current = prefs[KEY_CANDIDATE_RECORDING_DIRS] ?: emptySet()
+            prefs[KEY_CANDIDATE_RECORDING_DIRS] = current + path.trim()
+        }
+    }
+
+    /**
+     * 앱 초기 실행 시 실제 존재가 확인되어 기본 조회 폴더로 지정된 활성 폴더 목록(절대 경로)을 저장/조회합니다.
+     */
+    val activeRecordingDirsFlow: Flow<Set<String>> = context.dataStore.data.map { prefs ->
+        prefs[KEY_ACTIVE_RECORDING_DIRS] ?: emptySet()
+    }
+
+    suspend fun getActiveRecordingDirs(): Set<String> {
+        return context.dataStore.data.first()[KEY_ACTIVE_RECORDING_DIRS] ?: emptySet()
+    }
+
+    suspend fun saveActiveRecordingDirs(activePaths: Set<String>) {
+        context.dataStore.edit { prefs ->
+            prefs[KEY_ACTIVE_RECORDING_DIRS] = activePaths
+        }
+    }
+
+    /**
+     * 사진/동영상 탐색을 위한 후보(참고) 폴더 경로 목록을 반환합니다.
+     */
+    suspend fun getOrInitCandidatePhotoDirs(defaultCandidates: List<String>): Set<String> {
+        val prefs = context.dataStore.data.first()
+        val stored = prefs[KEY_CANDIDATE_PHOTO_DIRS]
+        if (!stored.isNullOrEmpty()) {
+            val merged = stored + defaultCandidates
+            if (merged.size != stored.size) {
+                context.dataStore.edit { it[KEY_CANDIDATE_PHOTO_DIRS] = merged }
+            }
+            return merged
+        }
+        val initialSet = defaultCandidates.toSet()
+        context.dataStore.edit { it[KEY_CANDIDATE_PHOTO_DIRS] = initialSet }
+        return initialSet
+    }
+
+    val activePhotoDirsFlow: Flow<Set<String>> = context.dataStore.data.map { prefs ->
+        prefs[KEY_ACTIVE_PHOTO_DIRS] ?: emptySet()
+    }
+
+    suspend fun saveActivePhotoDirs(activePaths: Set<String>) {
+        context.dataStore.edit { prefs ->
+            prefs[KEY_ACTIVE_PHOTO_DIRS] = activePaths
+        }
+    }
+
+    /**
+     * 과거 워터마크(`lastRecordingTs`) 비교 버그로 인해 미전송 녹음(예: TPhoneCallRecords)이
+     * 로컬 DB에서 `isSynced = true`로 잘못 마킹된 상태를 1회 초기화하여 서버 해시 대조를 거치도록 합니다.
+     */
+    suspend fun consumeRecordingHashOnlyResetNeeded(): Boolean {
+        val prefs = context.dataStore.data.first()
+        if (prefs[KEY_RECORDING_HASH_ONLY_RESET_V2] == true) return false
+        context.dataStore.edit {
+            it[KEY_RECORDING_HASH_ONLY_RESET_V2] = true
+            it[KEY_LAST_RECORDING_TS] = 0L
+        }
+        return true
     }
 
     suspend fun clearPairing() {

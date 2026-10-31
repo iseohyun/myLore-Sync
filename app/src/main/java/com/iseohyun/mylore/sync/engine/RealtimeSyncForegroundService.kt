@@ -16,6 +16,7 @@ import com.iseohyun.mylore.sync.data.local.AppDatabase
 import com.iseohyun.mylore.sync.data.local.entity.HealthSyncCacheEntity
 import com.iseohyun.mylore.sync.data.local.entity.KakaoRoomCacheEntity
 import com.iseohyun.mylore.sync.data.local.entity.NotificationEntity
+import com.iseohyun.mylore.sync.data.local.entity.PhotoMediaCacheEntity
 import com.iseohyun.mylore.sync.data.local.entity.RecordingCacheEntity
 import com.iseohyun.mylore.sync.data.prefs.AppPreferences
 import com.iseohyun.mylore.sync.data.remote.ApiClient
@@ -111,6 +112,7 @@ class RealtimeSyncForegroundService : Service() {
         val pendingVoiceRecs = mutableListOf<RecordingCacheEntity>()
         val unsyncedHealthFolders = mutableListOf<Pair<File, HealthSyncCacheEntity>>()
         val pendingHealthFiles = mutableListOf<Pair<File, HealthSyncCacheEntity>>()
+        val pendingPhotoMedia = mutableListOf<PhotoMediaCacheEntity>()
 
         var didTransmitData: Boolean = false
 
@@ -140,18 +142,23 @@ class RealtimeSyncForegroundService : Service() {
         var healthTotalBytes = 0L
         var healthSyncedBytes = 0L
 
+        var photoTotalCount = 0
+        var photoSyncedCount = 0
+        var photoTotalBytes = 0L
+        var photoSyncedBytes = 0L
+
         val totalBytes: Long
-            get() = kakaoTotalBytes + callTotalBytes + recTotalBytes + healthTotalBytes
+            get() = kakaoTotalBytes + callTotalBytes + recTotalBytes + healthTotalBytes + photoTotalBytes
 
         val syncedBytes: Long
-            get() = (kakaoSyncedBytes + callSyncedBytes + recSyncedBytes + healthSyncedBytes)
+            get() = (kakaoSyncedBytes + callSyncedBytes + recSyncedBytes + healthSyncedBytes + photoSyncedBytes)
                 .coerceAtMost(totalBytes)
 
         val totalCount: Int
-            get() = kakaoTotalCount + notiTotalCount + smsTotalCount + callTotalCount + recTotalCount + healthTotalCount
+            get() = kakaoTotalCount + notiTotalCount + smsTotalCount + callTotalCount + recTotalCount + healthTotalCount + photoTotalCount
 
         val syncedCount: Int
-            get() = (kakaoSyncedCount + notiSyncedCount + smsSyncedCount + callSyncedCount + recSyncedCount + healthSyncedCount)
+            get() = (kakaoSyncedCount + notiSyncedCount + smsSyncedCount + callSyncedCount + recSyncedCount + healthSyncedCount + photoSyncedCount)
                 .coerceAtMost(totalCount)
 
         fun toPlanRequest(isReady: Boolean): SessionPlanRequest {
@@ -168,7 +175,8 @@ class RealtimeSyncForegroundService : Service() {
                     sms = VolumePlanItem(smsTotalCount, smsSyncedCount, 0L, 0L),
                     call = VolumePlanItem(callTotalCount, callSyncedCount, callTotalBytes, callSyncedBytes),
                     recording = VolumePlanItem(recTotalCount, recSyncedCount, recTotalBytes, recSyncedBytes),
-                    health = VolumePlanItem(healthTotalCount, healthSyncedCount, healthTotalBytes, healthSyncedBytes)
+                    health = VolumePlanItem(healthTotalCount, healthSyncedCount, healthTotalBytes, healthSyncedBytes),
+                    photo = VolumePlanItem(photoTotalCount, photoSyncedCount, photoTotalBytes, photoSyncedBytes)
                 )
             )
         }
@@ -209,6 +217,16 @@ class RealtimeSyncForegroundService : Service() {
         return monitor.isBatteryAllowedForSync(isActiveSession = isSessionActive)
     }
 
+    private suspend fun markRecordingsSyncedInChunks(
+        cacheDao: com.iseohyun.mylore.sync.data.local.dao.SyncCacheDao,
+        hashes: Collection<String>
+    ) {
+        if (hashes.isEmpty()) return
+        for (chunk in hashes.distinct().chunked(400)) {
+            cacheDao.markRecordingsSyncedByHashes(chunk)
+        }
+    }
+
     private suspend fun publishSessionPlanSafely(ctx: SessionSyncContext, isReady: Boolean) {
         try {
             ctx.api.sendSessionPlan(ctx.token, ctx.toPlanRequest(isReady = isReady))
@@ -223,6 +241,10 @@ class RealtimeSyncForegroundService : Service() {
             val prefs = AppPreferences(applicationContext)
             val db = AppDatabase.getInstance(applicationContext)
             val monitor = SyncConditionMonitor(applicationContext)
+
+            // 서비스 시작 시 후보 녹음 및 사진 폴더 리스트 중 실제 존재하는 폴더를 확인하여 기본 조회 폴더로 초기화
+            CallRecordingCollector.initializeActiveDirectories(prefs)
+            PhotoMediaCollector.initializeActiveDirectories(prefs)
 
             while (isActive) {
                 try {
@@ -289,7 +311,7 @@ class RealtimeSyncForegroundService : Service() {
         // [Step 2-A] 로컬 캐시에 파악된 기존 데이터부터 즉시 선발송 (is_ready = false)
         sendInitialFastPlan(ctx)
 
-        // [Step 2-B] 6대 카테고리 미전송 데이터 스캔 및 정밀 용량 산출 후 발송 (is_ready = true)
+        // [Step 2-B] 카테고리별 미전송 데이터 스캔 및 정밀 용량 산출 후 발송 (is_ready = true)
         prepareAllPendingQueuesAndSendPlan(ctx)
 
         // [Step 3] 가장 오래된 내용(Oldest-First)부터 전송 시작 (방안 A: 경량 텍스트 우선 ➔ 대용량 파일)
@@ -299,6 +321,7 @@ class RealtimeSyncForegroundService : Service() {
         syncPendingKakaoTasks(ctx)
         syncPendingVoiceRecordings(ctx)
         syncPendingHealthFiles(ctx)
+        syncPendingPhotoMedia(ctx)
         syncContactsAndAppUsage(ctx)
 
         // [Step 4 & Step 5] 더 이상 보낼 데이터 없음 전달 ➔ 서버 Background Check & Client ACK
@@ -321,6 +344,7 @@ class RealtimeSyncForegroundService : Service() {
         val cachedCallRecsInit = cachedRecsInit.filter { CallRecordingCollector.isCallRecording(it) }
         val cachedVoiceRecsInit = cachedRecsInit.filter { !CallRecordingCollector.isCallRecording(it) }
         val cachedHealthInit = cacheDao.getAllHealthRecords().filter { it.isOnDevice && !it.isSynced }
+        val cachedPhotosInit = cacheDao.getUnsyncedPhotoMediaOldestFirst()
 
         ctx.kakaoTotalCount = cachedKakaoInit.size
         ctx.kakaoTotalBytes = cachedKakaoInit.sumOf { (it.totalBytes - it.syncedBytes).coerceAtLeast(0L) }
@@ -332,6 +356,8 @@ class RealtimeSyncForegroundService : Service() {
         ctx.recTotalBytes = cachedVoiceRecsInit.sumOf { it.fileSize }
         ctx.healthTotalCount = cachedHealthInit.sumOf { it.csvCount + it.jsonCount }
         ctx.healthTotalBytes = cachedHealthInit.sumOf { it.totalSizeKb * 1024L }
+        ctx.photoTotalCount = cachedPhotosInit.size
+        ctx.photoTotalBytes = cachedPhotosInit.sumOf { it.fileSize }
 
         if (ctx.totalCount > 0) {
             publishSessionPlanSafely(ctx, isReady = false)
@@ -372,7 +398,32 @@ class RealtimeSyncForegroundService : Service() {
         val lastRecTs = ctx.prefs.lastRecordingTs.first()
         val callCollector = CallLogCollector(applicationContext)
         callCollector.refreshCallLogCache(ctx.db, lastCallTs)
-        val allRecordings = CallRecordingCollector().refreshRecordingsCache(ctx.db, lastRecTs)
+        var allRecordings = CallRecordingCollector().refreshRecordingsCache(ctx.db, lastRecTs, ctx.prefs)
+
+        // 미전송 상태로 남은 녹음 파일들의 해시를 서버와 선대조하여 이미 서버에 존재하는 파일은 즉시 isSynced = true 복원
+        val unsyncedRecHashes = allRecordings.filter { !it.isSynced && it.fileHash.isNotBlank() }.map { it.fileHash }.distinct()
+        if (unsyncedRecHashes.isNotEmpty()) {
+            val alreadySyncedOnServer = mutableSetOf<String>()
+            for (chunk in unsyncedRecHashes.chunked(500)) {
+                try {
+                    val checkRes = ctx.api.checkHashes(ctx.token, CheckHashesRequest(chunk))
+                    if (checkRes.isSuccessful && checkRes.body() != null) {
+                        val missingSet = checkRes.body()!!.missingHashes.toSet()
+                        for (h in chunk) {
+                            if (!missingSet.contains(h)) {
+                                alreadySyncedOnServer.add(h)
+                            }
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+            if (alreadySyncedOnServer.isNotEmpty()) {
+                markRecordingsSyncedInChunks(cacheDao, alreadySyncedOnServer)
+                allRecordings = allRecordings.map { rec ->
+                    if (alreadySyncedOnServer.contains(rec.fileHash)) rec.copy(isSynced = true) else rec
+                }
+            }
+        }
 
         val allCallRecordings = allRecordings.filter { CallRecordingCollector.isCallRecording(it) }
         val allVoiceRecordings = allRecordings.filter { !CallRecordingCollector.isCallRecording(it) }
@@ -403,16 +454,22 @@ class RealtimeSyncForegroundService : Service() {
             ctx.pendingCallEvents.add(PendingCallEvent(call, matchedRec, call.ts))
         }
 
+        val standaloneCallRecEvents = mutableListOf<PendingCallEvent>()
         for (callRec in allCallRecordings) {
             if (!callRec.isSynced &&
                 !matchedCallRecPaths.contains(callRec.filePath) &&
                 (nowMs - callRec.recordedAt) >= RECENT_CALL_GRACE_PERIOD_MS &&
                 File(callRec.filePath).exists()
             ) {
-                ctx.pendingCallEvents.add(PendingCallEvent(null, callRec, callRec.recordedAt))
+                standaloneCallRecEvents.add(PendingCallEvent(null, callRec, callRec.recordedAt))
             }
         }
+        // 최근 14일 이내 누락 통화녹음을 최우선 전송한 뒤 나머지 백로그를 순차 전송
+        val recentCutoffMs = nowMs - (14L * 24L * 3600L * 1000L)
+        val (recentStandalone, olderStandalone) = standaloneCallRecEvents.partition { it.eventTs >= recentCutoffMs }
         ctx.pendingCallEvents.sortBy { it.eventTs }
+        ctx.pendingCallEvents.addAll(0, recentStandalone.sortedByDescending { it.eventTs })
+        ctx.pendingCallEvents.addAll(olderStandalone.sortedBy { it.eventTs })
 
         // 4) 카카오톡 대화방 폴더 (Oldest-First + `last_message_ts` 이후 미디어만 선별)
         val kakaoWatcher = KakaoChatFolderWatcher()
@@ -537,7 +594,16 @@ class RealtimeSyncForegroundService : Service() {
             }
         }
 
-        // 정밀 산출된 6대 카테고리 볼륨 개수 및 총 용량으로 SessionPlan 확정 및 전송 (is_ready = true)
+        // 7) 사진 및 미디어 (Camera, Pictures, Screen recordings, Screenshots, Videocaptures, Oldest-First: takenAt ASC)
+        val photoCollector = PhotoMediaCollector()
+        val allPhotos = photoCollector.refreshPhotoMediaCache(ctx.db, ctx.prefs)
+        ctx.pendingPhotoMedia.addAll(
+            allPhotos
+                .filter { !it.isSynced && File(it.filePath).exists() }
+                .sortedBy { it.takenAt }
+        )
+
+        // 정밀 산출된 카테고리 볼륨 개수 및 총 용량으로 SessionPlan 확정 및 전송 (is_ready = true)
         ctx.kakaoTotalCount = ctx.pendingKakaoTasks.size
         ctx.kakaoSyncedCount = 0
         ctx.kakaoTotalBytes = ctx.pendingKakaoTasks.sumOf { it.pendingTotalBytes }
@@ -563,6 +629,11 @@ class RealtimeSyncForegroundService : Service() {
         ctx.healthSyncedCount = 0
         ctx.healthTotalBytes = ctx.pendingHealthFiles.sumOf { it.first.length() }
         ctx.healthSyncedBytes = 0L
+
+        ctx.photoTotalCount = ctx.pendingPhotoMedia.size
+        ctx.photoSyncedCount = 0
+        ctx.photoTotalBytes = ctx.pendingPhotoMedia.sumOf { it.fileSize }
+        ctx.photoSyncedBytes = 0L
 
         if (ctx.totalCount > 0) {
             publishSessionPlanSafely(ctx, isReady = true)
@@ -684,21 +755,26 @@ class RealtimeSyncForegroundService : Service() {
 
         val callRecHashes = ctx.pendingCallEvents.mapNotNull { it.callRecording?.fileHash }.distinct()
         val missingCallRecHashes = if (callRecHashes.isNotEmpty()) {
-            try {
-                val checkRes = ctx.api.checkHashes(ctx.token, CheckHashesRequest(callRecHashes))
-                if (checkRes.isSuccessful && checkRes.body() != null) {
-                    val missing = checkRes.body()!!.missingHashes.toSet()
-                    val alreadyOnServer = callRecHashes.filter { !missing.contains(it) }
-                    if (alreadyOnServer.isNotEmpty()) {
-                        cacheDao.markRecordingsSyncedByHashes(alreadyOnServer)
+            val missingTotal = mutableSetOf<String>()
+            val alreadyTotal = mutableListOf<String>()
+            for (chunk in callRecHashes.chunked(500)) {
+                try {
+                    val checkRes = ctx.api.checkHashes(ctx.token, CheckHashesRequest(chunk))
+                    if (checkRes.isSuccessful && checkRes.body() != null) {
+                        val missing = checkRes.body()!!.missingHashes.toSet()
+                        missingTotal.addAll(missing)
+                        alreadyTotal.addAll(chunk.filter { !missing.contains(it) })
+                    } else {
+                        missingTotal.addAll(chunk)
                     }
-                    missing
-                } else {
-                    callRecHashes.toSet()
+                } catch (_: Exception) {
+                    missingTotal.addAll(chunk)
                 }
-            } catch (_: Exception) {
-                callRecHashes.toSet()
             }
+            if (alreadyTotal.isNotEmpty()) {
+                markRecordingsSyncedInChunks(cacheDao, alreadyTotal)
+            }
+            missingTotal
         } else emptySet()
 
         for (event in ctx.pendingCallEvents) {
@@ -955,10 +1031,17 @@ class RealtimeSyncForegroundService : Service() {
 
         val cacheDao = ctx.db.syncCacheDao()
         val recordingHashes = ctx.pendingVoiceRecs.map { it.fileHash }
-        val checkRes = ctx.api.checkHashes(ctx.token, CheckHashesRequest(recordingHashes))
-        if (!checkRes.isSuccessful || checkRes.body() == null) return
+        val missing = try {
+            val checkRes = ctx.api.checkHashes(ctx.token, CheckHashesRequest(recordingHashes))
+            if (checkRes.isSuccessful && checkRes.body() != null) {
+                checkRes.body()!!.missingHashes.toSet()
+            } else {
+                recordingHashes.toSet()
+            }
+        } catch (_: Exception) {
+            recordingHashes.toSet()
+        }
 
-        val missing = checkRes.body()!!.missingHashes.toSet()
         val alreadyOnServer = ctx.pendingVoiceRecs.filter { !missing.contains(it.fileHash) }
         if (alreadyOnServer.isNotEmpty()) {
             cacheDao.markRecordingsSyncedByHashes(alreadyOnServer.map { it.fileHash })
@@ -1071,6 +1154,101 @@ class RealtimeSyncForegroundService : Service() {
     }
 
     /**
+     * [Step 3-7] 사진 및 동영상 미디어 (Camera, Pictures, Screen recordings, Screenshots, Videocaptures)
+     * 가장 오래된 파일(Oldest-First: takenAt ASC)부터 서버 해시 대조 후 순차 전송
+     */
+    private suspend fun syncPendingPhotoMedia(ctx: SessionSyncContext) {
+        if (ctx.pendingPhotoMedia.isEmpty() || !canContinueSession(ctx.monitor)) return
+
+        val cacheDao = ctx.db.syncCacheDao()
+        val collector = PhotoMediaCollector()
+        val isoFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault())
+
+        ctx.api.batchInit(
+            ctx.token,
+            BatchInitRequest(
+                service = "photo",
+                totalCount = ctx.pendingPhotoMedia.size,
+                totalBytes = ctx.photoTotalBytes,
+                syncedBytes = ctx.photoSyncedBytes
+            )
+        )
+
+        for (batch in ctx.pendingPhotoMedia.chunked(50)) {
+            if (!canContinueSession(ctx.monitor)) break
+
+            val itemsWithHashes = ArrayList<Pair<PhotoMediaCacheEntity, String>>(batch.size)
+            for (item in batch) {
+                if (!canContinueSession(ctx.monitor)) break
+                val hash = collector.ensureFileHash(item, cacheDao)
+                itemsWithHashes.add(Pair(item, hash))
+            }
+
+            val nonBlankHashes = itemsWithHashes.mapNotNull { it.second.takeIf { h -> h.isNotBlank() } }.distinct()
+            val missingHashes = if (nonBlankHashes.isNotEmpty()) {
+                try {
+                    val checkRes = ctx.api.checkHashes(ctx.token, CheckHashesRequest(nonBlankHashes))
+                    if (checkRes.isSuccessful && checkRes.body() != null) {
+                        checkRes.body()!!.missingHashes.toSet()
+                    } else {
+                        nonBlankHashes.toSet()
+                    }
+                } catch (_: Exception) {
+                    nonBlankHashes.toSet()
+                }
+            } else emptySet()
+
+            val verifiedNow = System.currentTimeMillis()
+            val alreadySyncedItems = itemsWithHashes.filter { (_, hash) ->
+                hash.isNotBlank() && !missingHashes.contains(hash)
+            }.map { it.first }
+
+            if (alreadySyncedItems.isNotEmpty()) {
+                cacheDao.markPhotoMediaSyncedByPaths(
+                    paths = alreadySyncedItems.map { it.filePath },
+                    syncedAt = verifiedNow
+                )
+                ctx.photoSyncedCount += alreadySyncedItems.size
+                ctx.photoSyncedBytes += alreadySyncedItems.sumOf { it.fileSize }
+                publishSessionPlanSafely(ctx, isReady = true)
+            }
+
+            for ((item, hash) in itemsWithHashes) {
+                if (!canContinueSession(ctx.monitor)) break
+                if (hash.isNotBlank() && !missingHashes.contains(hash)) continue
+
+                val mediaFile = File(item.filePath)
+                if (!mediaFile.exists() || !mediaFile.isFile) continue
+
+                try {
+                    val takenAtStr = isoFormat.format(Date(item.takenAt))
+                    val takenReq = takenAtStr.toRequestBody("text/plain".toMediaTypeOrNull())
+                    val sourceReq = "device_photo".toRequestBody("text/plain".toMediaTypeOrNull())
+                    val folderReq = item.folderCategory.toRequestBody("text/plain".toMediaTypeOrNull())
+                    val mimeType = if (item.mediaType == "video") "video/*" else "image/*"
+                    val fileBody = mediaFile.asRequestBody(mimeType.toMediaTypeOrNull())
+                    val part = MultipartBody.Part.createFormData("file", mediaFile.name, fileBody)
+
+                    val upRes = ctx.api.uploadMediaFile(ctx.token, takenReq, sourceReq, part, folderReq)
+                    if (upRes.isSuccessful && upRes.body()?.ok == true) {
+                        val syncedAt = System.currentTimeMillis()
+                        ctx.didTransmitData = true
+                        cacheDao.markPhotoMediaSyncedByPaths(listOf(item.filePath), syncedAt)
+                        ctx.prefs.updateLastPhotoTs(item.takenAt)
+                        ctx.photoSyncedCount++
+                        ctx.photoSyncedBytes += item.fileSize
+                        publishSessionPlanSafely(ctx, isReady = true)
+                    }
+                } catch (e: Exception) {
+                    Log.w("SyncService", "Failed to upload photo/media file: ${item.fileName}", e)
+                }
+
+                checkAndProcessMidSessionEvents(ctx)
+            }
+        }
+    }
+
+    /**
      * 연락처(Contacts) 및 앱 사용량(App Usage) 증분 동기화
      */
     private suspend fun syncContactsAndAppUsage(ctx: SessionSyncContext) {
@@ -1105,7 +1283,7 @@ class RealtimeSyncForegroundService : Service() {
      * [Step 4 & Step 5]
      * 1) 클라이언트가 더 이상 보낼 데이터가 없음을 서버에 알립니다 (`POST /api/v1/sync/complete`).
      * 2) 서버는 Background Check를 수행하여 `client_ack == false`인 카톡 대화방(이름, 최신 대화 시각)과
-     *    알림/문자/통화/녹음/헬스 최신 시각을 클라이언트에 전달합니다.
+     *    알림/문자/통화/녹음/헬스/사진 최신 시각을 클라이언트에 전달합니다.
      *    (구 프로토콜에서 전송 후 삭제되어 클라이언트가 존재조차 모르는 대화방도 이 단계에서 복원됨)
      * 3) 클라이언트는 이를 로컬 DB 및 설정에 반영한 즉시 서버에 `POST /api/v1/sync/ack`를 전송하여
      *    서버가 DB에 `client_ack = true` 플래그를 기록하도록 합니다.
@@ -1128,7 +1306,8 @@ class RealtimeSyncForegroundService : Service() {
                     lastSmsTs = prefs.lastSmsTs.first(),
                     lastCallTs = prefs.lastCallTs.first(),
                     lastRecordingTs = prefs.lastRecordingTs.first(),
-                    lastHealthTs = prefs.lastHealthTs.first()
+                    lastHealthTs = prefs.lastHealthTs.first(),
+                    lastPhotoTs = prefs.lastPhotoTs.first()
                 )
             )
 
@@ -1145,6 +1324,7 @@ class RealtimeSyncForegroundService : Service() {
 
                 val roomsFromServer = body.unackedKakaoRooms.ifEmpty { body.kakaoRooms }
                 if (roomsFromServer.isNotEmpty()) {
+                    val verifiedNow = System.currentTimeMillis()
                     val existingMap = cacheDao.getAllKakaoRooms().associateBy { it.roomName }
                     val mergedRooms = mutableListOf<KakaoRoomCacheEntity>()
 
@@ -1152,7 +1332,8 @@ class RealtimeSyncForegroundService : Service() {
                         if (sRoom.roomName.isBlank()) continue
                         val local = existingMap[sRoom.roomName]
                         val mergedMsgTs = maxOf(local?.lastMessageTime ?: 0L, sRoom.lastMessageTs)
-                        val mergedSharedTs = maxOf(local?.lastSharedTime ?: 0L, sRoom.lastSharedTs)
+                        val rawSharedTs = maxOf(local?.lastSharedTime ?: 0L, sRoom.lastSharedTs)
+                        val mergedSharedTs = if (rawSharedTs > 0L) rawSharedTs else verifiedNow
                         val mergedTotalBytes = maxOf(local?.totalBytes ?: 0L, sRoom.totalBytes)
                         val mergedSyncedBytes = maxOf(local?.syncedBytes ?: 0L, sRoom.syncedBytes)
 
@@ -1199,33 +1380,34 @@ class RealtimeSyncForegroundService : Service() {
 
                 val domains = body.unackedDomains
                 if (domains != null) {
+                    val verifiedNow = System.currentTimeMillis()
                     domains.notification?.let { info ->
                         if (info.latestTs > 0L) {
                             prefs.updateLastNotiTs(info.latestTs)
+                            db.notificationDao().markNotificationsSyncedUpTo(info.latestTs, verifiedNow)
                             ackedDomains["notification"] = info.latestTs
                         }
                     }
                     domains.sms?.let { info ->
                         if (info.latestTs > 0L) {
                             prefs.updateLastSmsTs(info.latestTs)
-                            cacheDao.markSmsSyncedUpTo(info.latestTs)
+                            cacheDao.markSmsSyncedUpTo(info.latestTs, verifiedNow)
                             ackedDomains["sms"] = info.latestTs
                         }
                     }
                     domains.call?.let { info ->
                         if (info.latestTs > 0L) {
                             prefs.updateLastCallTs(info.latestTs)
-                            cacheDao.markCallLogsSyncedUpTo(info.latestTs)
+                            cacheDao.markCallLogsSyncedUpTo(info.latestTs, verifiedNow)
                             ackedDomains["call"] = info.latestTs
                         }
                     }
                     domains.recording?.let { info ->
                         if (info.syncedHashes.isNotEmpty()) {
-                            cacheDao.markRecordingsSyncedByHashes(info.syncedHashes)
+                            markRecordingsSyncedInChunks(cacheDao, info.syncedHashes)
                         }
                         if (info.latestTs > 0L) {
                             prefs.updateLastRecordingTs(info.latestTs)
-                            cacheDao.markRecordingsSyncedUpTo(info.latestTs)
                             ackedDomains["recording"] = info.latestTs
                         }
                     }
@@ -1248,6 +1430,17 @@ class RealtimeSyncForegroundService : Service() {
                             )
                             cacheDao.upsertHealthRecords(listOf(mergedHealth))
                             ackedDomains["health"] = info.latestTs
+                        }
+                    }
+                    domains.photo?.let { info ->
+                        if (info.syncedHashes.isNotEmpty()) {
+                            for (chunk in info.syncedHashes.distinct().chunked(400)) {
+                                cacheDao.markPhotoMediaSyncedByHashes(chunk, verifiedNow)
+                            }
+                        }
+                        if (info.latestTs > 0L) {
+                            prefs.updateLastPhotoTs(info.latestTs)
+                            ackedDomains["photo"] = info.latestTs
                         }
                     }
                 }
@@ -1331,6 +1524,7 @@ class RealtimeSyncForegroundService : Service() {
             }
 
             if (manifest != null) {
+                val verifiedNow = System.currentTimeMillis()
                 val ackedRooms = mutableListOf<AckedKakaoRoomItem>()
                 val ackedDomains = mutableMapOf<String, Long>()
 
@@ -1341,11 +1535,13 @@ class RealtimeSyncForegroundService : Service() {
                         prefs.updateRoomSyncedMessageTs(sRoom.roomName, sRoom.lastMessageTs)
                         ackedRooms.add(AckedKakaoRoomItem(sRoom.roomName, sRoom.lastMessageTs))
                         val local = existingMap[sRoom.roomName]
+                        val rawSharedTs = maxOf(local?.lastSharedTime ?: 0L, sRoom.lastSharedTs)
+                        val mergedSharedTs = if (rawSharedTs > 0L) rawSharedTs else verifiedNow
                         if (local != null) {
                             local.copy(
                                 lastMessage = sRoom.lastMessage.ifBlank { local.lastMessage },
                                 lastMessageTime = maxOf(local.lastMessageTime, sRoom.lastMessageTs),
-                                lastSharedTime = maxOf(local.lastSharedTime, sRoom.lastSharedTs),
+                                lastSharedTime = mergedSharedTs,
                                 syncedBytes = maxOf(local.syncedBytes, sRoom.syncedBytes)
                             )
                         } else {
@@ -1354,7 +1550,7 @@ class RealtimeSyncForegroundService : Service() {
                                 folderName = sRoom.folderName,
                                 lastMessage = sRoom.lastMessage,
                                 lastMessageTime = sRoom.lastMessageTs,
-                                lastSharedTime = sRoom.lastSharedTs,
+                                lastSharedTime = mergedSharedTs,
                                 totalBytes = sRoom.totalBytes,
                                 syncedBytes = sRoom.syncedBytes,
                                 percent = 100,
@@ -1376,7 +1572,7 @@ class RealtimeSyncForegroundService : Service() {
                             local.copy(
                                 latestRecordType = sHealth.latestRecordType.ifBlank { local.latestRecordType },
                                 lastDataTime = maxOf(local.lastDataTime, sHealth.lastDataTs),
-                                lastSharedTime = maxOf(local.lastSharedTime, sHealth.lastSharedTs),
+                                lastSharedTime = maxOf(local.lastSharedTime, sHealth.lastSharedTs).takeIf { it > 0L } ?: verifiedNow,
                                 isSynced = true
                             )
                         } else {
@@ -1384,7 +1580,7 @@ class RealtimeSyncForegroundService : Service() {
                                 folderName = sHealth.folderName,
                                 latestRecordType = sHealth.latestRecordType,
                                 lastDataTime = sHealth.lastDataTs,
-                                lastSharedTime = sHealth.lastSharedTs,
+                                lastSharedTime = sHealth.lastSharedTs.takeIf { it > 0L } ?: verifiedNow,
                                 csvCount = sHealth.csvCount,
                                 jsonCount = sHealth.jsonCount,
                                 totalSizeKb = sHealth.totalSizeKb,
@@ -1399,30 +1595,31 @@ class RealtimeSyncForegroundService : Service() {
                 }
 
                 if (manifest.syncedRecordingHashes.isNotEmpty()) {
-                    cacheDao.markRecordingsSyncedByHashes(manifest.syncedRecordingHashes)
+                    markRecordingsSyncedInChunks(cacheDao, manifest.syncedRecordingHashes)
                 }
                 if (manifest.lastSmsTs > 0L) {
                     prefs.updateLastSmsTs(manifest.lastSmsTs)
-                    cacheDao.markSmsSyncedUpTo(manifest.lastSmsTs)
+                    cacheDao.markSmsSyncedUpTo(manifest.lastSmsTs, verifiedNow)
                     ackedDomains["sms"] = manifest.lastSmsTs
                 }
                 if (manifest.syncedSmsIds.isNotEmpty()) {
-                    cacheDao.markSmsSyncedByIds(manifest.syncedSmsIds)
+                    cacheDao.markSmsSyncedByIds(manifest.syncedSmsIds, verifiedNow)
                 }
                 if (manifest.lastCallTs > 0L) {
                     prefs.updateLastCallTs(manifest.lastCallTs)
-                    cacheDao.markCallLogsSyncedUpTo(manifest.lastCallTs)
+                    cacheDao.markCallLogsSyncedUpTo(manifest.lastCallTs, verifiedNow)
                     ackedDomains["call"] = manifest.lastCallTs
                 }
                 if (manifest.syncedCallIds.isNotEmpty()) {
-                    cacheDao.markCallLogsSyncedByIds(manifest.syncedCallIds)
+                    cacheDao.markCallLogsSyncedByIds(manifest.syncedCallIds, verifiedNow)
                 }
                 if (manifest.lastNotiTs > 0L) {
                     prefs.updateLastNotiTs(manifest.lastNotiTs)
+                    db.notificationDao().markNotificationsSyncedUpTo(manifest.lastNotiTs, verifiedNow)
                     ackedDomains["notification"] = manifest.lastNotiTs
                 }
                 if (manifest.syncedNotiIds.isNotEmpty()) {
-                    db.notificationDao().markAsSynced(manifest.syncedNotiIds)
+                    db.notificationDao().markAsSynced(manifest.syncedNotiIds, verifiedNow)
                 }
                 if (manifest.lastRecordingTs > 0L) {
                     prefs.updateLastRecordingTs(manifest.lastRecordingTs)
