@@ -605,3 +605,259 @@ PC 서버는 `mobile/kakao/*.md`의 프론트매터(또는 DB)에 기록된 대�
 }
 ```
 
+---
+
+## 14. 🔄 최종 통합 동기화 프로토콜 명세 (v2.0 — 서버·클라이언트 공동 규격)
+
+> **목적**: 본 장은 `myLore Sync`(Android 클라이언트)와 `myLore`(PC 서버) 간에 확정된 **2대 동기화 조건(배터리 히스테리시스 포함)**, **세션 전송 계획(`session-plan`) 및 실시간 동적 증분 프로그레스 갱신**, **카테고리 우선순위 기반 Oldest-First 전송**, **통화기록+통화녹음 단일 이벤트 결합**, 그리고 **서버 주도 Background Check 및 `client_ack` 플래그 기반 상태 동기화(구 버전 누락 대화방 복원 및 미디어 증분 전송 최적화)**를 정의하는 최종 프로토콜 명세입니다.
+
+---
+
+### 14.1 동기화 조건 (Sync Trigger & Retention Conditions)
+
+기존의 Wi-Fi SSID 일치 강제 조건을 제거하고, 아래 **2대 조건**으로 단순화합니다 (Wi-Fi 정보는 서버 미연결 시 자동 접속 유도 수단으로만 사용).
+
+| 조건 항목 | 진입(시작) 조건 | 유지(히스테리시스 하한선) 조건 | 중단(Pause) 동작 |
+| :--- | :--- | :--- | :--- |
+| **1. 배터리 상태** | **충전 중**(`CHARGING` / `FULL`) **OR** **배터리 잔량 $\ge$ 80%** | 비충전 상태더라도 **배터리 잔량 $\ge$ 75%** 까지는 현재 동기화 세션 유지 | 비충전 상태에서 배터리가 **75% 미만($<$ 75%)**으로 하락 시, 현재 업로드 중인 단일 파일/배치까지만 완료하고 즉시 일시정지 |
+| **2. 서버와의 연결** | `GET /api/v1/status` 응답 `200 OK` (`ok: true`) | 전송 중 서버 응답 정상 유지 | 네트워크 단절 또는 연속 타임아웃 발생 시 즉시 루프 중단 및 대기 전환 |
+
+---
+
+### 14.2 전체 통신 프로토콜 시퀀스 (End-to-End Sequence)
+
+```mermaid
+sequenceDiagram
+    participant App as 📱 Android Client (myLore Sync)
+    participant Server as 💻 PC Server (myLore)
+    participant DB as 🗄️ Server DB (client_ack 관리)
+
+    Note over App,Server: [Phase 1] 서버 연결 및 동기화 조건 충족 (충전 중 or 배터리 >= 80%)
+    App->>Server: GET /api/v1/status (Header: X-MyLore-Token)
+    Server-->>App: 200 OK { ok: true, pc_name: "...", ... }
+
+    Note over App,Server: [Phase 2] 보낼 데이터의 크기 및 개수 전송 (선 캐시 즉시 발송 ➔ 후 스캔 갱신)
+    App->>Server: POST /api/v1/sync/session-plan (is_ready: false, 기존 파악된 대기 용량/개수 선발송)
+    App->>App: 백그라운드 정밀 스캔 (카톡 last_message_ts 이후 신규 미디어만 용량 합산)
+    App->>Server: POST /api/v1/sync/session-plan (is_ready: true, total_bytes: 100MB, total_count: 15, synced_bytes: 0)
+    Server-->>App: 200 OK (서버 프로그레스바 0MB / 100MB [15개] 초기화)
+
+    Note over App,Server: [Phase 3] 가장 오래된 내용(Oldest-First)부터 전송 시작
+    Note right of App: 순서: 경량(알림 ➔ 문자 ➔ 통화+통화녹음)<br/>➔ 대용량(카톡 ➔ 일반녹음 ➔ 헬스)
+    loop 각 카테고리 내부 가장 오래된(ASC) 항목부터 순차 전송
+        App->>Server: POST /api/v1/sync/{notifications | sms | call-logs+recordings | kakao | recordings | samsung-health}
+        Server->>DB: 데이터 저장 & 해당 도메인/대화방의 client_ack = false 리셋!
+        Server-->>App: 200 OK (클라이언트 synced_bytes 및 워터마크 전진)
+
+        opt 전송 도중(예: 30MB 전송 시점) 충전 중 새 이벤트(+10MB, +1개) 발생 시
+            App->>Server: POST /api/v1/sync/session-plan (total_bytes: 110MB, synced_bytes: 30MB, total_count: 16)
+            Server-->>App: 200 OK (서버 프로그레스바 30MB / 110MB [16개] 즉시 재조정)
+        end
+    end
+
+    Note over App,Server: [Phase 4] 더 이상 보낼 데이터 없음 전달 (Sync Complete)
+    App->>Server: POST /api/v1/sync/complete (클라이언트 보유 최신 시각 요약 포함)
+
+    Note over Server,DB: [Phase 5] 서버 Background Check 시작 (client_ack == false 대상 추출)
+    Server->>DB: client_ack == false 인 카톡 대화방 목록 및 5대 도메인 최신 시각 조회<br/>(과거 프로토콜로 전송되어 클라이언트가 존재조차 모르는 대화방 포함)
+    Server-->>App: 200 OK (SyncBackgroundCheckResponse: 미확인 대화방별 최신시각 & 도메인별 최신시각)
+
+    Note over App,Server: [Phase 6] 클라이언트 로컬 캐시 반영 및 ACK 전송
+    App->>App: 로컬 Room DB(kakao_room_cache 등)에 대화방 이름 & 최신 대화시각 저장<br/>(차후 내보내기 시 이 시각 이후의 사진/동영상만 전송하도록 최적화 활성화)
+    App->>Server: POST /api/v1/sync/ack (확인 완료한 대화방 목록 및 도메인별 최신 시각 ACK)
+    Server->>DB: 수신된 대화방 및 도메인의 client_ack = true 기록<br/>(차후 새 데이터로 갱신되기 전까지 Background Check 공유 생략)
+    Server-->>App: 200 OK { ok: true }
+```
+
+---
+
+### 14.3 단계별 상세 프로토콜 규격
+
+#### Step 1 & Step 2: 보낼 데이터의 크기 및 개수 전송 (`POST /api/v1/sync/session-plan`)
+
+1. **선(先) 발송 · 후(後) 갱신 원칙**:
+   - 서버와 연결된 직후 아직 파일 해시나 폴더 스캔이 완료되지 않았다면, **기존 로컬 캐시에 파악되어 있는 미전송 데이터 기준으로 즉시 1차 전송(`"is_ready": false`)**합니다.
+   - 백그라운드 스캔이 완료되면 최종 계산된 용량과 개수로 **2차 갱신 전송(`"is_ready": true`)**합니다.
+
+2. **카테고리별 용량(`Bytes`) 및 볼륨 개수(`Count`) 산정 기준**:
+   - **세션 누적 기준**: 모든 용량과 개수는 **"이번 동기화 세션에서 전송해야 할 미전송(Pending) 총량"**과 **"이번 세션에서 전송 완료한 양"**을 기준으로 합니다.
+   - **총 데이터 크기 (`total_bytes`)**: 파일 기반 데이터인 **`카톡 + 통화녹음 + 일반녹음 + 헬스`의 바이트 총합**입니다. DB 레코드형 데이터(문자, 알림, 통화기록 텍스트)는 바이트 크기를 `0`으로 두어 건수(`count`)만 카운트합니다.
+
+| 카테고리 키 | 볼륨 개수 (`total_count`) 산정 기준 | 데이터 용량 (`total_bytes`) 산정 기준 | 비고 |
+| :--- | :--- | :--- | :--- |
+| **`kakao`** | 미전송 카톡 내보내기 **폴더(대화방) 개수** | `KakaoTalkChats.txt` 크기 + **전송 대상 신규 미디어 파일(`last_message_ts` 이후 파일)들의 바이트 합계** | 이미 알고 있는 `last_message_ts` 이전 미디어는 용량에서 제외 |
+| **`sms`** | 미전송 문자(SMS/MMS/RCS) **레코드 건수** | `0` (건수만 카운트) | DB형 데이터 |
+| **`notification`** | 미전송 알림 **레코드 건수** | `0` (건수만 카운트) | DB형 데이터 |
+| **`call`** | 미전송 **통화 이벤트(통화기록 + 매칭 통화녹음 결합) 건수** | 매칭된 미전송 **통화 녹음 오디오 파일들의 바이트 합계** (녹음 없는 통화는 `0B`) | 통화기록과 통화녹음을 1개 이벤트로 통합 카운트 |
+| **`recording`** | 미전송 **일반 음성 녹음 파일 개수** (통화녹음 제외) | 미전송 일반 음성 녹음 오디오 파일들의 바이트 합계 | `Voice Recorder`, 워치 음성메모 등 |
+| **`health`** | 미전송 헬스 폴더 내 **개별 파일(`.csv` + `.json`)의 총개수** | 전송 대상 `.csv` 및 `.json` 파일들의 바이트 합계 | 폴더 수가 아닌 개별 파일 수 |
+
+3. **전송 도중 새 이벤트 발생 시 동적 업데이트 (Dynamic Progress Adjustment)**:
+   - 동기화(충전 중) 도중 새로운 이벤트(새 문자/알림 수신, 새 통화+녹음 완료, 새 카톡 내보내기 감지 등)가 발생하면, 클라이언트는 기존 세션의 `total_bytes`와 `total_count`에 **추가된 데이터 크기와 개수를 더하여 `POST /api/v1/sync/session-plan`을 재호출**합니다.
+   - **예시**:
+     - 초기 계획: `total_bytes = 100MB`, `total_count = 15개`, `synced_bytes = 0MB`
+     - `30MB` 전송 중 `10MB (1개)` 새 이벤트 추가 발생
+     - 재전송 페이로드: `total_bytes = 110MB`, `synced_bytes = 30MB`, `total_count = 16개`
+     - 서버 UI 동작: 현재 프로그레스바를 즉시 **`30MB / 110MB (16개)`**로 갱신.
+
+4. **`POST /api/v1/sync/session-plan` JSON 페이로드 규격**:
+```json
+{
+  "session_id": "sess_1761880000000",
+  "is_ready": true,
+  "total_bytes": 115343360,
+  "synced_bytes": 31457280,
+  "total_count": 16,
+  "synced_count": 4,
+  "volumes": {
+    "kakao": { "total_count": 2, "synced_count": 0, "total_bytes": 95000000, "synced_bytes": 25000000 },
+    "sms": { "total_count": 5, "synced_count": 2, "total_bytes": 0, "synced_bytes": 0 },
+    "notification": { "total_count": 4, "synced_count": 2, "total_bytes": 0, "synced_bytes": 0 },
+    "call": { "total_count": 1, "synced_count": 0, "total_bytes": 10343360, "synced_bytes": 0 },
+    "recording": { "total_count": 1, "synced_count": 0, "total_bytes": 6457280, "synced_bytes": 6457280 },
+    "health": { "total_count": 3, "synced_count": 0, "total_bytes": 3542720, "synced_bytes": 0 }
+  }
+}
+```
+
+---
+
+#### Step 3: 가장 오래된 내용부터 전송 시작 (Oldest-First & 도메인별 세부 규칙)
+
+1. **전송 우선순위 (방안 A)**:
+   - **1순위 (경량 실시간 데이터)**: `알림(Notification)` ➔ `문자(SMS/MMS)` ➔ `통화(통화기록 + 매칭 통화녹음)`
+   - **2순위 (대용량 파일 데이터)**: `카카오톡(KakaoTalk)` ➔ `일반 녹음(Voice Recordings)` ➔ `삼성 헬스(Samsung Health)`
+   - **각 카테고리 내부 정렬**: 반드시 **가장 오래된 데이터(`timestamp ASC`)**부터 순서대로 전송하며, 레코드 1건이 완료될 때마다 전송되지 않은 가장 오래된 데이터 기준점을 갱신합니다.
+
+2. **통화 기록 + 통화 녹음 단일 이벤트 처리 규칙**:
+   - **수집 분리**:
+     - **통화 녹음(`Call Recording`)**: `/sdcard/Recordings/Call`, `/sdcard/Recordings/TPhoneCallRecords`, `/sdcard/Call` 내 오디오 파일
+     - **일반 녹음(`Voice Recording`)**: `/sdcard/Recordings/Voice Recorder`, `/sdcard/Voice Recorder`, `/sdcard/Recordings/Sounds` (워치 메모 포함) 내 오디오 파일
+   - **매칭 및 완료 판정 (데드락 방지 포함)**:
+     - **최신 통화 60초 지연(Grace Period)**: 통화 종료 시각(`call.ts + call.durationSec * 1000`)으로부터 **60초가 지나지 않은 최신 통화**는 녹음 파일이 디스크에 생성 완료될 때까지 전송 및 완료 판정을 보류합니다.
+     - **Case A — 매칭되는 통화 녹음 파일이 단말에 존재하는 통화**:
+       전화번호(숫자 정규화)가 일치하고 녹음 시각이 `[call.ts - 10초 ~ call.ts + duration + 60초]` 범위 내에 있는 통화 녹음 파일이 존재하면, **① 통화 기록(`POST /api/v1/sync/call-logs`)과 ② 통화 녹음 파일(`POST /api/v1/sync/call-recordings`)이 모두 업로드 성공해야만** 해당 통화 이벤트를 완료 처리합니다.
+     - **Case B — 매칭되는 통화 녹음 파일이 없는 통화** (부재중 전화, 수신 거절, 미녹음 통화 등):
+       통화 종료 후 60초가 경과했음에도 매칭되는 통화 녹음 파일이 없으면, **통화 기록(`POST /api/v1/sync/call-logs`) 전송 성공 즉시 완료 처리**합니다.
+
+3. **카카오톡 대화방 최신 대화 시각(`last_message_ts`) 기반 미디어 증분 필터링**:
+   - 클라이언트가(로컬 캐시 또는 Step 5 서버 Background Check를 통해) 특정 대화방(`room_name`)의 서버 보유 최신 대화 시각(`last_message_ts`)을 알고 있는 경우:
+   - 해당 대화방의 내보내기 폴더를 전송할 때, 폴더 내 첨부 사진·동영상 중 **`mediaFile.lastModified() > last_message_ts`인 신규 미디어 파일만** 해시 계산 및 업로드를 수행하고, `last_message_ts` 이전의 과거 미디어 파일은 이미 공유된 것으로 간주하여 스킵합니다.
+
+---
+
+#### Step 4 & Step 5: Sync 완료 통보, 서버 Background Check 및 `client_ack` 플래그 프로토콜
+
+> **핵심 설계 배경 (구 프로토콜 누락 복원 및 전송 효율 극대화)**:  
+> 이전 통신 프로토콜에서는 클라이언트가 서버로 카톡 채팅 정보를 전송한 뒤 폴더를 삭제하면서 로컬에 전송 기록을 남기지 않았기 때문에, **클라이언트가 과거에 보낸 대화방의 존재 자체나 최신 대화 시각을 모르고 있을 수 있습니다.**  
+> 클라이언트가 존재조차 모르는 대화방은 클라이언트가 먼저 요청할 수 없으므로, **서버가 자신이 보유한 각 대화방 및 도메인 데이터의 `client_ack` 플래그를 검사하여 `client_ack == false`인 항목을 먼저 클라이언트에게 내려주고, 클라이언트로부터 `ACK`를 받으면 서버 DB에 `client_ack = true`를 기록**하는 방식으로 동작해야 합니다.
+
+##### 1) 서버 DB의 `client_ack` 플래그 상태 머신 (Server-Side State Machine)
+
+서버는 아래 6개 도메인 테이블(또는 메타데이터 스토어)에 각각 **`client_ack` (`BOOLEAN DEFAULT FALSE`)** 플래그를 관리합니다:
+
+| 도메인 | 서버가 관리하는 최신 상태 정보 | `client_ack = false`로 설정(리셋)되는 시점 | `client_ack = true`로 설정되는 시점 |
+| :--- | :--- | :--- | :--- |
+| **1. 카톡 대화방별**<br>(`kakao_rooms`) | 대화방 이름(`room_name`), 최신 대화 시각(`last_message_ts`), 마지막 대화 요약(`last_message`), 누적 용량(`total_bytes`) | • **최초 DB 마이그레이션 시 기존 보유 모든 대화방 (`false`)**<br>• 클라이언트가 해당 대화방의 새 대화/미디어를 업로드하여 최신 시각이 갱신된 직후 | 클라이언트가 `POST /api/v1/sync/ack`로 해당 `room_name`과 `last_message_ts`를 확인 응답했을 때 |
+| **2. 알림**<br>(`notification`) | 서버가 전송받은 알림 목록의 최신 이벤트 시각 (`last_noti_ts`) | • 최초 초기값 (`false`)<br>• 새 알림이 업로드되어 `last_noti_ts`가 갱신된 직후 | 클라이언트가 해당 `last_noti_ts`에 대해 `ACK`를 보냈을 때 |
+| **3. 문자**<br>(`sms`) | 서버가 전송받은 문자 목록의 최신 이벤트 시각 (`last_sms_ts`) | • 최초 초기값 (`false`)<br>• 새 문자가 업로드되어 `last_sms_ts`가 갱신된 직후 | 클라이언트가 해당 `last_sms_ts`에 대해 `ACK`를 보냈을 때 |
+| **4. 통화 (기록+녹음)**<br>(`call`) | 통화기록과 (존재 시) 통화녹음이 모두 전송 완료된 최신 통화 시각 (`last_call_ts`) | • 최초 초기값 (`false`)<br>• 새 통화 이벤트(기록+녹음)가 완료되어 `last_call_ts`가 갱신된 직후 | 클라이언트가 해당 `last_call_ts`에 대해 `ACK`를 보냈을 때 |
+| **5. 일반 녹음**<br>(`recording`) | 일반 음성 녹음 목록의 최신 녹음 시각 (`last_recording_ts`) 및 신규 수신 파일 해시 목록 | • 최초 초기값 (`false`)<br>• 새 일반 녹음 파일이 업로드되어 `last_recording_ts`가 갱신된 직후 | 클라이언트가 해당 `last_recording_ts`에 대해 `ACK`를 보냈을 때 |
+| **6. 삼성 헬스**<br>(`health`) | 서버에 현존하는 최신 로그 기록(`.csv`/`.json`)을 참고하여 추출한 최신 데이터 시각 (`last_health_ts`) 및 최신 종목(`latest_record_type`) | • 최초 초기값 (`false`)<br>• 새 헬스 파일이 업로드되어 `last_health_ts`가 갱신된 직후 | 클라이언트가 해당 `last_health_ts`에 대해 `ACK`를 보냈을 때 |
+
+##### 2) API 1: 클라이언트의 Sync 완료 선언 및 서버 Background Check 결과 수신 (`POST /api/v1/sync/complete`)
+
+클라이언트가 Step 3에서 더 이상 보낼 데이터가 없을 때 호출합니다. 서버는 즉시 Background Check를 수행하여 **현재 서버 DB에서 `client_ack == false`인 모든 항목**과, (필요시) 클라이언트-서버 대조 결과 누락된 역방향 재전송 요청(`rewind_watermarks`)을 응답합니다.
+
+- **Request (`POST /api/v1/sync/complete`)**:
+```json
+{
+  "session_id": "sess_1761880000000",
+  "client_latest": {
+    "last_kakao_ts": 1761870000000,
+    "last_noti_ts": 1761869000000,
+    "last_sms_ts": 1761865000000,
+    "last_call_ts": 1761860000000,
+    "last_recording_ts": 1761855000000,
+    "last_health_ts": 1761800000000
+  }
+}
+```
+
+- **Response (`SyncCompleteResponse` — 서버의 Background Check 결과)**:
+  - `unacked_kakao_rooms`: 서버 DB에서 `client_ack == false`인 대화방 목록 (과거에 전송되어 클라이언트가 존재를 모르는 대화방들도 최초에는 모두 `client_ack == false`이므로 이 배열을 통해 클라이언트에게 빠짐없이 전달됨).
+  - `unacked_domains`: 서버 DB에서 `client_ack == false`인 도메인들의 최신 이벤트 시각 (이미 `client_ack == true`이고 그 이후 갱신이 없었던 도메인은 `null` 또는 생략되어 불필요한 체크를 하지 않음).
+```json
+{
+  "ok": true,
+  "has_unacked_updates": true,
+  "unacked_kakao_rooms": [
+    {
+      "room_name": "홍길동",
+      "folder_name": "KakaoTalk_Chats_2026-10-30_21.15.00",
+      "last_message": "내일 뵙겠습니다.",
+      "last_message_ts": 1761826320000,
+      "last_shared_ts": 1761870000000,
+      "total_bytes": 15420000,
+      "synced_bytes": 15420000
+    },
+    {
+      "room_name": "가족 단톡방",
+      "folder_name": "KakaoTalk_Chats_2026-09-15_10.00.00",
+      "last_message": "추석 때 봐요!",
+      "last_message_ts": 1757898000000,
+      "last_shared_ts": 1757900000000,
+      "total_bytes": 128000000,
+      "synced_bytes": 128000000
+    }
+  ],
+  "unacked_domains": {
+    "notification": { "latest_ts": 1761869000000 },
+    "sms": { "latest_ts": 1761865000000 },
+    "call": { "latest_ts": 1761860000000 },
+    "recording": {
+      "latest_ts": 1761855000000,
+      "synced_hashes": ["e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"]
+    },
+    "health": {
+      "latest_ts": 1761800000000,
+      "latest_record_type": "운동 세션 & 워치 GPS 경로",
+      "folder_name": "samsunghealth_iseohyun_20261030120000"
+    }
+  }
+}
+```
+
+##### 3) API 2: 클라이언트의 로컬 DB 반영 후 ACK 확정 전송 (`POST /api/v1/sync/ack`)
+
+클라이언트는 `unacked_kakao_rooms`와 `unacked_domains`를 수신하는 즉시 로컬 Room DB(`kakao_room_cache`, `health_sync_cache`, `sms_cache`, `call_log_cache`, `recording_cache`, `notifications`)와 `AppPreferences`에 최신 시각을 기록한 뒤, 아래 `ACK` 요청을 서버로 보냅니다.
+
+- **Request (`POST /api/v1/sync/ack`)**:
+```json
+{
+  "acked_kakao_rooms": [
+    { "room_name": "홍길동", "last_message_ts": 1761826320000 },
+    { "room_name": "가족 단톡방", "last_message_ts": 1757898000000 }
+  ],
+  "acked_domains": {
+    "notification": 1761869000000,
+    "sms": 1761865000000,
+    "call": 1761860000000,
+    "recording": 1761855000000,
+    "health": 1761800000000
+  }
+}
+```
+
+- **Server Action & Response**:
+  - 서버는 `acked_kakao_rooms`에 포함된 각 대화방의 현재 `last_message_ts`가 클라이언트가 확인한 `last_message_ts`와 일치하면 **`client_ack = true`**로 DB에 저장합니다.
+  - 서버는 `acked_domains`에 포함된 각 도메인의 현재 최신 시각이 클라이언트가 확인한 시각과 일치하면 해당 도메인의 **`client_ack = true`**로 DB에 저장합니다.
+  - 이후 새로운 데이터가 들어와 해당 대화방이나 도메인의 최신 시각이 변경되면 서버는 즉시 **`client_ack = false`로 플래그를 삭제(초기화)**하고 다음 Background Check에서 다시 공유하며, 변경이 없으면 `client_ack == true`이므로 체크하지 않고 건너뜁니다.
+```json
+{
+  "ok": true,
+  "acked_room_count": 2,
+  "acked_domain_count": 5
+}
+```
+

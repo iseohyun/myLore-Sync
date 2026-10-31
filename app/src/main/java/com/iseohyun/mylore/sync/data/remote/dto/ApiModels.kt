@@ -5,6 +5,7 @@ import com.google.gson.annotations.SerializedName
 data class StatusResponse(
     @SerializedName("ok") val ok: Boolean = false,
     @SerializedName("pc_name") val pcName: String = "",
+    @SerializedName("ssid") val ssid: String = "",
     @SerializedName("version") val version: String = "",
     @SerializedName("force_full_sync") val forceFullSync: Boolean = false,
     @SerializedName("last_kakao_ts") val lastKakaoTs: Long = 0L,
@@ -91,7 +92,10 @@ data class SyncManifestResponse(
 
 data class BatchInitRequest(
     @SerializedName("service") val service: String,
-    @SerializedName("total_count") val totalCount: Int
+    @SerializedName("total_count") val totalCount: Int,
+    @SerializedName("total_bytes") val totalBytes: Long = 0L,
+    @SerializedName("synced_bytes") val syncedBytes: Long = 0L,
+    @SerializedName("is_lazy_update") val isLazyUpdate: Boolean = false
 )
 
 data class PairConfirmRequest(
@@ -198,3 +202,88 @@ data class SyncAppUsageItem(
 data class SyncAppUsageRequest(
     @SerializedName("items") val items: List<SyncAppUsageItem>
 )
+
+// ==================== v2.0 통합 동기화 프로토콜 DTO ====================
+
+data class VolumePlanItem(
+    @SerializedName("total_count") val totalCount: Int = 0,
+    @SerializedName("synced_count") val syncedCount: Int = 0,
+    @SerializedName("total_bytes") val totalBytes: Long = 0L,
+    @SerializedName("synced_bytes") val syncedBytes: Long = 0L
+)
+
+data class SessionVolumesDto(
+    @SerializedName("kakao") val kakao: VolumePlanItem = VolumePlanItem(),
+    @SerializedName("notification") val notification: VolumePlanItem = VolumePlanItem(),
+    @SerializedName("sms") val sms: VolumePlanItem = VolumePlanItem(),
+    @SerializedName("call") val call: VolumePlanItem = VolumePlanItem(),
+    @SerializedName("recording") val recording: VolumePlanItem = VolumePlanItem(),
+    @SerializedName("health") val health: VolumePlanItem = VolumePlanItem()
+)
+
+data class SessionPlanRequest(
+    @SerializedName("session_id") val sessionId: String,
+    @SerializedName("is_ready") val isReady: Boolean,
+    @SerializedName("total_bytes") val totalBytes: Long,
+    @SerializedName("synced_bytes") val syncedBytes: Long,
+    @SerializedName("total_count") val totalCount: Int,
+    @SerializedName("synced_count") val syncedCount: Int,
+    @SerializedName("volumes") val volumes: SessionVolumesDto
+)
+
+data class ClientLatestTimestampsDto(
+    @SerializedName("last_kakao_ts") val lastKakaoTs: Long = 0L,
+    @SerializedName("last_noti_ts") val lastNotiTs: Long = 0L,
+    @SerializedName("last_sms_ts") val lastSmsTs: Long = 0L,
+    @SerializedName("last_call_ts") val lastCallTs: Long = 0L,
+    @SerializedName("last_recording_ts") val lastRecordingTs: Long = 0L,
+    @SerializedName("last_health_ts") val lastHealthTs: Long = 0L
+)
+
+data class SyncCompleteRequest(
+    @SerializedName("session_id") val sessionId: String,
+    @SerializedName("client_latest") val clientLatest: ClientLatestTimestampsDto
+)
+
+data class UnackedDomainInfo(
+    @SerializedName("latest_ts") val latestTs: Long = 0L,
+    @SerializedName("synced_hashes") val syncedHashes: List<String> = emptyList(),
+    @SerializedName("latest_record_type") val latestRecordType: String = "",
+    @SerializedName("folder_name") val folderName: String = ""
+)
+
+data class UnackedDomainsDto(
+    @SerializedName("notification") val notification: UnackedDomainInfo? = null,
+    @SerializedName("sms") val sms: UnackedDomainInfo? = null,
+    @SerializedName("call") val call: UnackedDomainInfo? = null,
+    @SerializedName("recording") val recording: UnackedDomainInfo? = null,
+    @SerializedName("health") val health: UnackedDomainInfo? = null
+)
+
+data class SyncCompleteResponse(
+    @SerializedName("ok") val ok: Boolean = false,
+    @SerializedName("has_unacked_updates") val hasUnackedUpdates: Boolean = false,
+    @SerializedName("unacked_kakao_rooms") val unackedKakaoRooms: List<ServerKakaoRoomInfo> = emptyList(),
+    @SerializedName("unacked_domains") val unackedDomains: UnackedDomainsDto? = null,
+    // 하위 호환 필드 (manifest/reconcile 공유)
+    @SerializedName("kakao_rooms") val kakaoRooms: List<ServerKakaoRoomInfo> = emptyList(),
+    @SerializedName("health_records") val healthRecords: List<ServerHealthRecordInfo> = emptyList(),
+    @SerializedName("synced_recording_hashes") val syncedRecordingHashes: List<String> = emptyList()
+)
+
+data class AckedKakaoRoomItem(
+    @SerializedName("room_name") val roomName: String,
+    @SerializedName("last_message_ts") val lastMessageTs: Long
+)
+
+data class SyncAckRequest(
+    @SerializedName("acked_kakao_rooms") val ackedKakaoRooms: List<AckedKakaoRoomItem> = emptyList(),
+    @SerializedName("acked_domains") val ackedDomains: Map<String, Long> = emptyMap()
+)
+
+data class SyncAckResponse(
+    @SerializedName("ok") val ok: Boolean = false,
+    @SerializedName("acked_room_count") val ackedRoomCount: Int = 0,
+    @SerializedName("acked_domain_count") val ackedDomainCount: Int = 0
+)
+

@@ -48,6 +48,12 @@ interface SyncCacheDao {
     @Query("UPDATE sms_cache SET isSynced = 1 WHERE id IN (:ids)")
     suspend fun markSmsSyncedByIds(ids: List<Long>)
 
+    @Query("SELECT * FROM sms_cache WHERE isSynced = 0 ORDER BY ts ASC LIMIT :limit")
+    suspend fun getUnsyncedSms(limit: Int = 500): List<SmsCacheEntity>
+
+    @Query("SELECT COUNT(*) FROM sms_cache WHERE isSynced = 0")
+    suspend fun getUnsyncedSmsCount(): Int
+
     @Query("SELECT MIN(ts) FROM sms_cache WHERE isSynced = 0")
     suspend fun getOldestUnsyncedSmsTs(): Long?
 
@@ -69,6 +75,12 @@ interface SyncCacheDao {
 
     @Query("UPDATE call_log_cache SET isSynced = 1 WHERE id IN (:ids)")
     suspend fun markCallLogsSyncedByIds(ids: List<Long>)
+
+    @Query("SELECT * FROM call_log_cache WHERE isSynced = 0 ORDER BY ts ASC LIMIT :limit")
+    suspend fun getUnsyncedCallLogs(limit: Int = 500): List<CallLogCacheEntity>
+
+    @Query("SELECT COUNT(*) FROM call_log_cache WHERE isSynced = 0")
+    suspend fun getUnsyncedCallLogCount(): Int
 
     @Query("SELECT MIN(ts) FROM call_log_cache WHERE isSynced = 0")
     suspend fun getOldestUnsyncedCallTs(): Long?

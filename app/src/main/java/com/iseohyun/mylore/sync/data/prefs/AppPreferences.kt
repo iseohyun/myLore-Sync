@@ -12,7 +12,8 @@ import kotlinx.coroutines.flow.map
 data class RoomSyncProgress(
     val syncedBytes: Long,
     val totalBytes: Long,
-    val lastSharedTs: Long
+    val lastSharedTs: Long,
+    val lastSyncedMessageTs: Long = 0L
 )
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "mylore_preferences")
@@ -137,23 +138,44 @@ class AppPreferences(private val context: Context) {
         val keySynced = longPreferencesKey("kakao_room_${hash}_synced")
         val keyTotal = longPreferencesKey("kakao_room_${hash}_total")
         val keyTs = longPreferencesKey("kakao_room_${hash}_ts")
+        val keyMsgTs = longPreferencesKey("kakao_room_${hash}_msg_ts")
         val prefs = context.dataStore.data.first()
         return RoomSyncProgress(
             syncedBytes = prefs[keySynced] ?: 0L,
             totalBytes = prefs[keyTotal] ?: 0L,
-            lastSharedTs = prefs[keyTs] ?: 0L
+            lastSharedTs = prefs[keyTs] ?: 0L,
+            lastSyncedMessageTs = prefs[keyMsgTs] ?: 0L
         )
     }
 
-    suspend fun updateRoomSyncProgress(roomName: String, syncedBytes: Long, totalBytes: Long, lastSharedTs: Long) {
+    suspend fun updateRoomSyncProgress(
+        roomName: String,
+        syncedBytes: Long,
+        totalBytes: Long,
+        lastSharedTs: Long,
+        lastSyncedMessageTs: Long = 0L
+    ) {
         val hash = getRoomKeyHash(roomName)
         val keySynced = longPreferencesKey("kakao_room_${hash}_synced")
         val keyTotal = longPreferencesKey("kakao_room_${hash}_total")
         val keyTs = longPreferencesKey("kakao_room_${hash}_ts")
+        val keyMsgTs = longPreferencesKey("kakao_room_${hash}_msg_ts")
         context.dataStore.edit { prefs ->
             prefs[keySynced] = syncedBytes
             prefs[keyTotal] = totalBytes
             prefs[keyTs] = lastSharedTs
+            if (lastSyncedMessageTs > 0L) {
+                prefs[keyMsgTs] = maxOf(prefs[keyMsgTs] ?: 0L, lastSyncedMessageTs)
+            }
+        }
+    }
+
+    suspend fun updateRoomSyncedMessageTs(roomName: String, lastMessageTs: Long) {
+        if (lastMessageTs <= 0L) return
+        val hash = getRoomKeyHash(roomName)
+        val keyMsgTs = longPreferencesKey("kakao_room_${hash}_msg_ts")
+        context.dataStore.edit { prefs ->
+            prefs[keyMsgTs] = maxOf(prefs[keyMsgTs] ?: 0L, lastMessageTs)
         }
     }
 
@@ -211,6 +233,9 @@ class AppPreferences(private val context: Context) {
      */
     suspend fun reconcileWatermarksWithServer(status: StatusResponse) {
         context.dataStore.edit { prefs ->
+            if (status.ssid.isNotBlank()) {
+                prefs[KEY_SERVER_SSID] = status.ssid
+            }
             if (status.forceFullSync) {
                 prefs[KEY_LAST_KAKAO_TS] = 0L
                 prefs[KEY_LAST_SMS_TS] = 0L

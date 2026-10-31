@@ -12,28 +12,65 @@ import com.iseohyun.mylore.sync.data.remote.ApiClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
+data class BatteryStatusInfo(
+    val isCharging: Boolean = false,
+    val batteryPct: Int = 0
+) {
+    /**
+     * 시작 조건: 충전 중 OR 배터리 잔량 >= 80%
+     * 유지 조건(히스테리시스): 비충전 상태더라도 이미 시작된 세션은 배터리 >= 75%까지 유지
+     */
+    fun isBatteryOk(isActiveSession: Boolean = false): Boolean {
+        val threshold = if (isActiveSession) SyncConditionMonitor.BATTERY_RETENTION_THRESHOLD_PCT else SyncConditionMonitor.BATTERY_START_THRESHOLD_PCT
+        return isCharging || batteryPct >= threshold
+    }
+}
+
 data class SyncConditionState(
     val isWifiConnected: Boolean = false,
     val currentSsid: String = "",
     val isServerWifiMatched: Boolean = false,
     val isCharging: Boolean = false,
+    val batteryPct: Int = 0,
     val isPcReachable: Boolean = false,
     val pcName: String = "",
     val lastSmsTs: Long = 0L,
     val lastCallTs: Long = 0L,
     val lastNotiTs: Long = 0L
 ) {
+    val isBatteryConditionMet: Boolean
+        get() = isCharging || batteryPct >= SyncConditionMonitor.BATTERY_START_THRESHOLD_PCT
+
     val isAllConditionsMet: Boolean
-        get() = (isServerWifiMatched || (isWifiConnected && isPcReachable)) && isCharging && isPcReachable
+        get() = isBatteryConditionMet && isPcReachable
 }
 
 class SyncConditionMonitor(private val context: Context) {
 
-    fun checkChargingStatus(): Boolean {
+    companion object {
+        const val BATTERY_START_THRESHOLD_PCT = 80
+        const val BATTERY_RETENTION_THRESHOLD_PCT = 75
+    }
+
+    fun checkBatteryInfo(): BatteryStatusInfo {
         val intentFilter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
         val batteryStatus = context.registerReceiver(null, intentFilter)
         val status = batteryStatus?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
-        return status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
+        val isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
+
+        val level = batteryStatus?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = batteryStatus?.getIntExtra(BatteryManager.EXTRA_SCALE, 100)?.coerceAtLeast(1) ?: 100
+        val pct = if (level >= 0) ((level * 100f) / scale).toInt().coerceIn(0, 100) else 0
+
+        return BatteryStatusInfo(isCharging = isCharging, batteryPct = pct)
+    }
+
+    fun checkChargingStatus(): Boolean {
+        return checkBatteryInfo().isCharging
+    }
+
+    fun isBatteryAllowedForSync(isActiveSession: Boolean = false): Boolean {
+        return checkBatteryInfo().isBatteryOk(isActiveSession)
     }
 
     fun checkWifiInfo(): Pair<Boolean, String> {
@@ -75,3 +112,4 @@ class SyncConditionMonitor(private val context: Context) {
         }
     }
 }
+
