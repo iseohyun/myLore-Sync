@@ -218,7 +218,8 @@ data class SessionVolumesDto(
     @SerializedName("sms") val sms: VolumePlanItem = VolumePlanItem(),
     @SerializedName("call") val call: VolumePlanItem = VolumePlanItem(),
     @SerializedName("recording") val recording: VolumePlanItem = VolumePlanItem(),
-    @SerializedName("health") val health: VolumePlanItem = VolumePlanItem()
+    @SerializedName("health") val health: VolumePlanItem = VolumePlanItem(),
+    @SerializedName("photo") val photo: VolumePlanItem = VolumePlanItem()
 )
 
 data class SessionPlanRequest(
@@ -237,7 +238,8 @@ data class ClientLatestTimestampsDto(
     @SerializedName("last_sms_ts") val lastSmsTs: Long = 0L,
     @SerializedName("last_call_ts") val lastCallTs: Long = 0L,
     @SerializedName("last_recording_ts") val lastRecordingTs: Long = 0L,
-    @SerializedName("last_health_ts") val lastHealthTs: Long = 0L
+    @SerializedName("last_health_ts") val lastHealthTs: Long = 0L,
+    @SerializedName("last_photo_ts") val lastPhotoTs: Long = 0L
 )
 
 data class SyncCompleteRequest(
@@ -257,7 +259,8 @@ data class UnackedDomainsDto(
     @SerializedName("sms") val sms: UnackedDomainInfo? = null,
     @SerializedName("call") val call: UnackedDomainInfo? = null,
     @SerializedName("recording") val recording: UnackedDomainInfo? = null,
-    @SerializedName("health") val health: UnackedDomainInfo? = null
+    @SerializedName("health") val health: UnackedDomainInfo? = null,
+    @SerializedName("photo") val photo: UnackedDomainInfo? = null
 )
 
 data class SyncCompleteResponse(

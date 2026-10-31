@@ -11,5 +11,6 @@ data class NotificationEntity(
     val text: String,
     val subText: String = "",
     val postedAt: Long,
-    val isSynced: Boolean = false
+    val isSynced: Boolean = false,
+    val syncedAt: Long = 0L
 )

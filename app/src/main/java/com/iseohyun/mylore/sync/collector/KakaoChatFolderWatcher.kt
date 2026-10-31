@@ -220,6 +220,10 @@ class KakaoChatFolderWatcher {
                 else -> 0
             }
 
+            if (percent >= 100 && lastSharedTime <= 0L) {
+                lastSharedTime = System.currentTimeMillis()
+            }
+
             toUpsert.add(
                 KakaoRoomCacheEntity(
                     roomName = roomKey,
@@ -248,6 +252,7 @@ class KakaoChatFolderWatcher {
         } else {
             dao.markAllKakaoRoomsDeletedOnDevice()
         }
+        dao.backfillMissingKakaoSharedTime(System.currentTimeMillis())
 
         return dao.getAllKakaoRooms()
     }

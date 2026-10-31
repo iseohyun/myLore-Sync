@@ -80,6 +80,7 @@ fun DashboardScreen(
                         DrawerItem.CALL,
                         DrawerItem.NOTIFICATION,
                         DrawerItem.RECORDINGS,
+                        DrawerItem.PHOTO,
                         DrawerItem.HEALTH
                     ).forEach { item ->
                         NavigationDrawerItem(
@@ -145,11 +146,18 @@ fun DashboardScreen(
             }
             DrawerItem.NOTIFICATION -> {
                 NotificationListScreen(
+                    appPreferences = appPreferences,
                     onOpenDrawer = { scope.launch { drawerState.open() } }
                 )
             }
             DrawerItem.RECORDINGS -> {
                 RecordingsListScreen(
+                    appPreferences = appPreferences,
+                    onOpenDrawer = { scope.launch { drawerState.open() } }
+                )
+            }
+            DrawerItem.PHOTO -> {
+                PhotoListScreen(
                     appPreferences = appPreferences,
                     onOpenDrawer = { scope.launch { drawerState.open() } }
                 )

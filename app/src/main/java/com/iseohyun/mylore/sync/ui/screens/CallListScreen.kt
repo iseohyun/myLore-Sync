@@ -1,9 +1,10 @@
 package com.iseohyun.mylore.sync.ui.screens
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -12,17 +13,31 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.iseohyun.mylore.sync.collector.CallLogCollector
 import com.iseohyun.mylore.sync.collector.CallRecordingCollector
 import com.iseohyun.mylore.sync.data.local.AppDatabase
+import com.iseohyun.mylore.sync.data.local.entity.CallLogCacheEntity
+import com.iseohyun.mylore.sync.data.local.entity.RecordingCacheEntity
 import com.iseohyun.mylore.sync.data.prefs.AppPreferences
+import com.iseohyun.mylore.sync.data.remote.dto.SyncCallLogItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.text.SimpleDateFormat
-import java.util.*
 
+private data class CallTableRowModel(
+    val key: String,
+    val directionLabel: String,
+    val targetLabel: String,
+    val eventTs: Long,
+    val durationText: String,
+    val voiceText: String,
+    val completedSyncTs: Long
+)
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun CallListScreen(
     appPreferences: AppPreferences,
@@ -31,37 +46,75 @@ fun CallListScreen(
     val context = LocalContext.current
     val db = remember { AppDatabase.getInstance(context) }
 
-    // 1. 기존 캐시된 통화 이력 및 녹음 파일 목록 즉시 렌더링 (0ms)
     val callLogs by db.syncCacheDao().getAllCallLogsFlow().collectAsState(initial = emptyList())
-    val recordings by db.syncCacheDao().getAllRecordingsFlow().collectAsState(initial = emptyList())
+    val allRecordings by db.syncCacheDao().getAllRecordingsFlow().collectAsState(initial = emptyList())
     val lastCallTs by appPreferences.lastCallTs.collectAsState(initial = 0L)
     val lastRecordingTs by appPreferences.lastRecordingTs.collectAsState(initial = 0L)
+    var contactMap by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var isRefreshing by remember { mutableStateOf(true) }
+    val verifiedTimeMs = remember { System.currentTimeMillis() }
 
-    // 2. 백그라운드 지연 업데이트: 새로 추가된 통화 및 변경된 녹음 파일만 증분 스캔
+    // T전화녹음(TPhoneCallRecords) 및 통화녹음만 필터링하여 통화 항목에서 통합 관리
+    val callRecordings = remember(allRecordings) {
+        allRecordings.filter { CallRecordingCollector.isCallRecording(it) }
+    }
+
     LaunchedEffect(lastCallTs, lastRecordingTs) {
         isRefreshing = true
         withContext(Dispatchers.IO) {
+            contactMap = loadPhoneToNameMap(context)
             CallLogCollector(context).refreshCallLogCache(db, lastCallTs)
-            CallRecordingCollector().refreshRecordingsCache(db, lastRecordingTs)
+            CallRecordingCollector().refreshRecordingsCache(db, lastRecordingTs, appPreferences)
         }
         isRefreshing = false
     }
 
-    val dateFormat = remember { SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.KOREA) }
-
-    val pendingRecordings = remember(recordings, lastRecordingTs) {
-        recordings.filter { !it.isSynced && it.recordedAt > lastRecordingTs }
+    // 전송성공은 확실하나 시각정보(syncedAt)가 없다면 검증시각으로 DB 덮어쓰기
+    LaunchedEffect(callLogs, callRecordings, lastCallTs) {
+        val callNeedsBackfill = callLogs.any {
+            (it.isSynced || (lastCallTs > 0L && it.ts <= lastCallTs)) && it.syncedAt <= 0L
+        }
+        val recNeedsBackfill = callRecordings.any { it.isSynced && it.syncedAt <= 0L }
+        if (callNeedsBackfill || recNeedsBackfill) {
+            val now = System.currentTimeMillis()
+            withContext(Dispatchers.IO) {
+                if (lastCallTs > 0L) {
+                    db.syncCacheDao().markCallLogsSyncedUpTo(lastCallTs, now)
+                }
+                db.syncCacheDao().backfillMissingCallLogSyncedAt(now)
+                db.syncCacheDao().backfillMissingRecordingSyncedAt(now)
+            }
+        }
     }
-    val oldestPendingVoiceTs = remember(pendingRecordings) {
-        pendingRecordings.minOfOrNull { it.recordedAt }
+
+    val tableRows = remember(callLogs, callRecordings, contactMap, lastCallTs, verifiedTimeMs) {
+        buildUnifiedCallTableRows(
+            callLogs = callLogs,
+            callRecordings = callRecordings,
+            contactMap = contactMap,
+            lastCallTs = lastCallTs,
+            verifiedTimeMs = verifiedTimeMs
+        )
+    }
+
+    val syncedRowCount = remember(tableRows) { tableRows.count { it.completedSyncTs > 0L } }
+
+    val columns = remember {
+        listOf(
+            TableColumnSpec("송수신", 0.11f, TextAlign.Center),
+            TableColumnSpec("대상", 0.22f, TextAlign.Start),
+            TableColumnSpec("이벤트시기", 0.22f, TextAlign.Center),
+            TableColumnSpec("통화시간", 0.14f, TextAlign.Center),
+            TableColumnSpec("음성여부", 0.09f, TextAlign.Center),
+            TableColumnSpec("전송완료시기", 0.22f, TextAlign.Center)
+        )
     }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .statusBarsPadding()
-            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .padding(horizontal = 10.dp, vertical = 8.dp)
     ) {
         // Top Header
         Row(
@@ -73,13 +126,13 @@ fun CallListScreen(
                 IconButton(onClick = onOpenDrawer) {
                     Text("☰", fontSize = 24.sp, fontWeight = FontWeight.Bold)
                 }
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("통화 기록 및 녹음 동기화", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("통화 및 통화녹음(T전화) 동기화", fontSize = 18.sp, fontWeight = FontWeight.Bold)
             }
 
             if (isRefreshing) {
                 Text(
-                    "🔄 추가 통화 확인 중...",
+                    "🔄 확인 중...",
                     fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.primary,
                     fontWeight = FontWeight.Medium
@@ -87,140 +140,264 @@ fun CallListScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
         // Summary Card
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)
         ) {
-            Column(modifier = Modifier.padding(14.dp)) {
-                Text("📞 통화 및 음성 파일 현황", fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                Spacer(modifier = Modifier.height(6.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text("보유 통화: ${callLogs.size}건", fontSize = 13.sp)
-                    Text("녹음 파일: ${recordings.size}개", fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                }
-                Spacer(modifier = Modifier.height(4.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Text(
-                    "아직 서버로 전송하지 않은 가장 오래된 통화음성 시점: " +
-                            if (oldestPendingVoiceTs != null) dateFormat.format(Date(oldestPendingVoiceTs)) else "모두 동기화됨",
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onTertiaryContainer
+                    "📞 통화이벤트 ${tableRows.size}건 (통화녹음 ${callRecordings.size}개 포함)",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 12.sp
+                )
+                Text(
+                    "완료: ${syncedRowCount}건 · 미완료: ${tableRows.size - syncedRowCount}건",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (syncedRowCount < tableRows.size) MaterialTheme.colorScheme.error else Color(0xFF2E7D32)
                 )
             }
         }
 
-        Spacer(modifier = Modifier.height(14.dp))
+        Spacer(modifier = Modifier.height(10.dp))
 
-        if (callLogs.isEmpty() && isRefreshing) {
+        if (tableRows.isEmpty() && isRefreshing) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator()
             }
-        } else if (callLogs.isEmpty()) {
+        } else if (tableRows.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("기기에 통화 이력이 없습니다.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("기기에 통화 이력이나 통화 녹음이 없습니다.", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         } else {
-            LazyColumn(
+            Surface(
                 modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                shape = RoundedCornerShape(8.dp),
+                tonalElevation = 1.dp
             ) {
-                items(callLogs, key = { it.id }) { item ->
-                    val isLogSynced = item.isSynced || (lastCallTs > 0L && item.ts <= lastCallTs)
-                    val matchedVoice = recordings.firstOrNull { rec ->
-                        (rec.phoneNumber.isNotBlank() && item.number.contains(rec.phoneNumber)) &&
-                                (Math.abs(rec.recordedAt - item.ts) < 300_000L)
+                LazyColumn(modifier = Modifier.fillMaxSize()) {
+                    stickyHeader {
+                        StickyTableHeader(columns = columns)
                     }
 
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-                    ) {
-                        Column(modifier = Modifier.padding(12.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(
-                                        when (item.callType) {
-                                            "incoming" -> "📥 수신"
-                                            "outgoing" -> "📤 발신"
-                                            "missed" -> "⚠️ 부재중"
-                                            "rejected" -> "🚫 거절"
-                                            else -> "📞 통화"
-                                        },
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        if (item.name.isNotBlank()) "${item.name} (${item.number})" else item.number,
-                                        fontWeight = FontWeight.SemiBold,
-                                        fontSize = 14.sp
-                                    )
-                                }
-
-                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    Box(
-                                        modifier = Modifier
-                                            .background(
-                                                if (isLogSynced) Color(0xFFE8F5E9) else Color(0xFFFFEBEE),
-                                                RoundedCornerShape(4.dp)
-                                            )
-                                            .padding(horizontal = 5.dp, vertical = 2.dp)
-                                    ) {
-                                        Text(
-                                            if (isLogSynced) "기록완료" else "기록대기",
-                                            fontSize = 10.sp,
-                                            color = if (isLogSynced) Color(0xFF2E7D32) else Color(0xFFC62828),
-                                            fontWeight = FontWeight.Medium
-                                        )
-                                    }
-
-                                    if (matchedVoice != null) {
-                                        val isVoiceSynced = matchedVoice.isSynced || (lastRecordingTs > 0L && matchedVoice.recordedAt <= lastRecordingTs)
-                                        Box(
-                                            modifier = Modifier
-                                                .background(
-                                                    if (isVoiceSynced) Color(0xFFE1F5FE) else Color(0xFFFFF3E0),
-                                                    RoundedCornerShape(4.dp)
-                                                )
-                                                .padding(horizontal = 5.dp, vertical = 2.dp)
-                                        ) {
-                                            Text(
-                                                if (isVoiceSynced) "🎙️음성전송됨" else "🎙️음성대기",
-                                                fontSize = 10.sp,
-                                                color = if (isVoiceSynced) Color(0xFF0277BD) else Color(0xFFE65100),
-                                                fontWeight = FontWeight.Medium
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-
-                            Spacer(modifier = Modifier.height(6.dp))
-
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text("통화시간: ${item.durationSec}초", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text(
-                                    dateFormat.format(Date(item.ts)),
-                                    fontSize = 11.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
+                    itemsIndexed(tableRows, key = { _, row -> row.key }) { index, row ->
+                        val rowBg = if (index % 2 == 0) {
+                            MaterialTheme.colorScheme.surface
+                        } else {
+                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
                         }
+
+                        val dirColor = when (row.directionLabel) {
+                            "송신" -> MaterialTheme.colorScheme.primary
+                            "수신" -> MaterialTheme.colorScheme.secondary
+                            "거부" -> MaterialTheme.colorScheme.error
+                            else -> MaterialTheme.colorScheme.outline
+                        }
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(rowBg)
+                                .padding(horizontal = 6.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = row.directionLabel,
+                                modifier = Modifier
+                                    .weight(columns[0].weight)
+                                    .padding(horizontal = 1.dp),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                textAlign = TextAlign.Center,
+                                color = dirColor
+                            )
+
+                            Text(
+                                text = row.targetLabel,
+                                modifier = Modifier
+                                    .weight(columns[1].weight)
+                                    .padding(horizontal = 2.dp),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+
+                            Text(
+                                text = formatTableDateTime(row.eventTs),
+                                modifier = Modifier
+                                    .weight(columns[2].weight)
+                                    .padding(horizontal = 1.dp),
+                                fontSize = 10.sp,
+                                textAlign = TextAlign.Center,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+
+                            Text(
+                                text = row.durationText,
+                                modifier = Modifier
+                                    .weight(columns[3].weight)
+                                    .padding(horizontal = 1.dp),
+                                fontSize = 10.sp,
+                                textAlign = TextAlign.Center,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+
+                            Text(
+                                text = row.voiceText,
+                                modifier = Modifier
+                                    .weight(columns[4].weight)
+                                    .padding(horizontal = 1.dp),
+                                fontSize = 11.sp,
+                                fontWeight = if (row.voiceText != "-") FontWeight.Bold else FontWeight.Normal,
+                                textAlign = TextAlign.Center,
+                                color = if (row.voiceText != "-") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
+                            )
+
+                            Text(
+                                text = formatTableDateTime(row.completedSyncTs),
+                                modifier = Modifier
+                                    .weight(columns[5].weight)
+                                    .padding(horizontal = 1.dp),
+                                fontSize = 10.sp,
+                                fontWeight = if (row.completedSyncTs > 0L) FontWeight.SemiBold else FontWeight.Normal,
+                                textAlign = TextAlign.Center,
+                                color = if (row.completedSyncTs > 0L) Color(0xFF2E7D32) else MaterialTheme.colorScheme.outline
+                            )
+                        }
+                        HorizontalDivider(
+                            thickness = 0.5.dp,
+                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                        )
                     }
                 }
             }
         }
     }
+}
+
+private fun buildUnifiedCallTableRows(
+    callLogs: List<CallLogCacheEntity>,
+    callRecordings: List<RecordingCacheEntity>,
+    contactMap: Map<String, String>,
+    lastCallTs: Long,
+    verifiedTimeMs: Long
+): List<CallTableRowModel> {
+    val rows = ArrayList<CallTableRowModel>(callLogs.size + callRecordings.size)
+    val matchedRecPaths = HashSet<String>()
+
+    for (call in callLogs) {
+        val syncDto = SyncCallLogItem(
+            id = call.id,
+            number = call.number,
+            name = call.name,
+            callType = call.callType,
+            durationSec = call.durationSec,
+            ts = call.ts
+        )
+        val matchedRec = CallRecordingCollector.findMatchingCallRecording(syncDto, callRecordings)
+        if (matchedRec != null) {
+            matchedRecPaths.add(matchedRec.filePath)
+        }
+
+        val dirLabel = when (call.callType) {
+            "outgoing" -> "송신"
+            "incoming" -> "수신"
+            "rejected", "missed" -> "거부"
+            else -> "-"
+        }
+
+        val target = resolveContactOrPhone(
+            rawPhoneOrAddress = call.number,
+            cachedName = call.name.ifBlank { matchedRec?.contactName ?: "" },
+            contactMap = contactMap
+        )
+
+        val durationStr = if (call.durationSec > 0L) {
+            formatDurationHhMmSs(call.durationSec)
+        } else if (call.callType == "rejected" || call.callType == "missed") {
+            "00:00:00"
+        } else {
+            "00:00:00"
+        }
+
+        val isLogSynced = call.syncedAt > 0L || call.isSynced || (lastCallTs > 0L && call.ts <= lastCallTs)
+        val effectiveLogSyncTs = when {
+            call.syncedAt > 0L -> call.syncedAt
+            isLogSynced -> verifiedTimeMs
+            else -> 0L
+        }
+
+        // 프로토콜 규칙: 통화기록과 통화녹음을 하나의 이벤트로 간주하여, 녹음이 있으면 둘 다 완료되어야 완료로 판정
+        val completedSyncTs = if (matchedRec != null) {
+            val isRecSynced = matchedRec.syncedAt > 0L || matchedRec.isSynced
+            val effectiveRecSyncTs = when {
+                matchedRec.syncedAt > 0L -> matchedRec.syncedAt
+                isRecSynced -> verifiedTimeMs
+                else -> 0L
+            }
+            if (isLogSynced && isRecSynced) {
+                maxOf(effectiveLogSyncTs, effectiveRecSyncTs)
+            } else {
+                0L
+            }
+        } else {
+            effectiveLogSyncTs
+        }
+
+        rows.add(
+            CallTableRowModel(
+                key = "call_${call.id}",
+                directionLabel = dirLabel,
+                targetLabel = target,
+                eventTs = call.ts,
+                durationText = durationStr,
+                voiceText = if (matchedRec != null) "O" else "-",
+                completedSyncTs = completedSyncTs
+            )
+        )
+    }
+
+    // CallLog에 매칭되지 않은 단독 T전화녹음(TPhoneCallRecords) 및 통화녹음도 통화 표에 통합
+    for (rec in callRecordings) {
+        if (matchedRecPaths.contains(rec.filePath)) continue
+
+        val target = resolveContactOrPhone(
+            rawPhoneOrAddress = rec.phoneNumber,
+            cachedName = rec.contactName,
+            contactMap = contactMap
+        ).let { resolved ->
+            if (resolved == "-") rec.fileName.ifBlank { "-" } else resolved
+        }
+
+        val isRecSynced = rec.syncedAt > 0L || rec.isSynced
+        val completedSyncTs = when {
+            rec.syncedAt > 0L -> rec.syncedAt
+            isRecSynced -> verifiedTimeMs
+            else -> 0L
+        }
+
+        rows.add(
+            CallTableRowModel(
+                key = "rec_${rec.filePath}",
+                directionLabel = "-",
+                targetLabel = target,
+                eventTs = rec.recordedAt,
+                durationText = "-",
+                voiceText = "O",
+                completedSyncTs = completedSyncTs
+            )
+        )
+    }
+
+    return rows.sortedByDescending { it.eventTs }
 }

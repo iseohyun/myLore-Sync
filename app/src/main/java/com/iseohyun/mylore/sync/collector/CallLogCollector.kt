@@ -15,10 +15,12 @@ class CallLogCollector(private val context: Context) {
      */
     suspend fun refreshCallLogCache(db: AppDatabase, lastCallWatermarkTs: Long) {
         val dao = db.syncCacheDao()
+        val verifiedNow = System.currentTimeMillis()
         val maxCachedTs = dao.getMaxCallLogTs() ?: 0L
         val newLogs = collectCallLogsSince(maxCachedTs)
         if (newLogs.isNotEmpty()) {
             val entities = newLogs.map { item ->
+                val synced = lastCallWatermarkTs > 0L && item.ts <= lastCallWatermarkTs
                 CallLogCacheEntity(
                     id = item.id,
                     number = item.number,
@@ -26,14 +28,16 @@ class CallLogCollector(private val context: Context) {
                     callType = item.callType,
                     durationSec = item.durationSec,
                     ts = item.ts,
-                    isSynced = lastCallWatermarkTs > 0L && item.ts <= lastCallWatermarkTs
+                    isSynced = synced,
+                    syncedAt = if (synced) verifiedNow else 0L
                 )
             }
             dao.insertCallLogs(entities)
         }
         if (lastCallWatermarkTs > 0L) {
-            dao.markCallLogsSyncedUpTo(lastCallWatermarkTs)
+            dao.markCallLogsSyncedUpTo(lastCallWatermarkTs, verifiedNow)
         }
+        dao.backfillMissingCallLogSyncedAt(verifiedNow)
     }
 
     fun collectCallLogsSince(sinceTs: Long): List<SyncCallLogItem> {
