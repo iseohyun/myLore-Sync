@@ -15,8 +15,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.iseohyun.mylore.sync.collector.SmsAndMmsCollector
+import com.iseohyun.mylore.sync.data.local.AppDatabase
 import com.iseohyun.mylore.sync.data.prefs.AppPreferences
-import com.iseohyun.mylore.sync.data.remote.dto.SyncSmsItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
@@ -28,23 +28,28 @@ fun SmsListScreen(
     onOpenDrawer: () -> Unit
 ) {
     val context = LocalContext.current
-    var smsList by remember { mutableStateOf<List<SyncSmsItem>>(emptyList()) }
-    var isLoading by remember { mutableStateOf(true) }
-    val lastSmsTs by appPreferences.lastSmsTs.collectAsState(initial = 0L)
+    val db = remember { AppDatabase.getInstance(context) }
 
-    LaunchedEffect(Unit) {
+    // 1. 기존 캐시된 문자 목록 즉시 렌더링 (0ms)
+    val smsList by db.syncCacheDao().getAllSmsFlow().collectAsState(initial = emptyList())
+    val lastSmsTs by appPreferences.lastSmsTs.collectAsState(initial = 0L)
+    var isRefreshing by remember { mutableStateOf(true) }
+
+    // 2. 백그라운드 지연 업데이트: 마지막 캐시 시점 이후에 새로 추가된 문자만 증분 조회
+    LaunchedEffect(lastSmsTs) {
+        isRefreshing = true
         withContext(Dispatchers.IO) {
-            val collector = SmsAndMmsCollector(context)
-            // 전체 문자(0L부터) 수집
-            smsList = collector.collectSmsSince(0L).reversed()
-            isLoading = false
+            SmsAndMmsCollector(context).refreshSmsCache(db, lastSmsTs)
         }
+        isRefreshing = false
     }
 
     val dateFormat = remember { SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.KOREA) }
 
-    val pendingList = smsList.filter { it.ts > lastSmsTs }
-    val oldestPendingTs = pendingList.minOfOrNull { it.ts }
+    val pendingList = remember(smsList, lastSmsTs) {
+        smsList.filter { !it.isSynced && it.ts > lastSmsTs }
+    }
+    val oldestPendingTs = remember(pendingList) { pendingList.minOfOrNull { it.ts } }
 
     Column(
         modifier = Modifier
@@ -55,13 +60,25 @@ fun SmsListScreen(
         // Top Header
         Row(
             modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(onClick = onOpenDrawer) {
-                Text("☰", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onOpenDrawer) {
+                    Text("☰", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("문자(SMS / MMS) 동기화", fontSize = 20.sp, fontWeight = FontWeight.Bold)
             }
-            Spacer(modifier = Modifier.width(8.dp))
-            Text("문자(SMS / MMS) 동기화", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+
+            if (isRefreshing) {
+                Text(
+                    "🔄 추가 문자 확인 중...",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Medium
+                )
+            }
         }
 
         Spacer(modifier = Modifier.height(12.dp))
@@ -79,7 +96,12 @@ fun SmsListScreen(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text("보유 총 문자: ${smsList.size}건", fontSize = 13.sp)
-                    Text("미전송: ${pendingList.size}건", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = if (pendingList.isNotEmpty()) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
+                    Text(
+                        "미전송: ${pendingList.size}건",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (pendingList.isNotEmpty()) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                    )
                 }
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
@@ -93,7 +115,7 @@ fun SmsListScreen(
 
         Spacer(modifier = Modifier.height(14.dp))
 
-        if (isLoading) {
+        if (smsList.isEmpty() && isRefreshing) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator()
             }
@@ -106,8 +128,8 @@ fun SmsListScreen(
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                items(smsList) { item ->
-                    val isSynced = item.ts <= lastSmsTs
+                items(smsList, key = { it.id }) { item ->
+                    val isSynced = item.isSynced || (lastSmsTs > 0L && item.ts <= lastSmsTs)
                     Card(
                         modifier = Modifier.fillMaxWidth(),
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)

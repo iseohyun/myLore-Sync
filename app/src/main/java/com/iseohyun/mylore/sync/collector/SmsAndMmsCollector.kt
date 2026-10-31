@@ -3,6 +3,8 @@ package com.iseohyun.mylore.sync.collector
 import android.content.Context
 import android.net.Uri
 import android.util.Log
+import com.iseohyun.mylore.sync.data.local.AppDatabase
+import com.iseohyun.mylore.sync.data.local.entity.SmsCacheEntity
 import com.iseohyun.mylore.sync.data.remote.dto.SyncSmsItem
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -14,6 +16,32 @@ class SmsAndMmsCollector(private val context: Context) {
         private const val MMS_ID_OFFSET = 1_000_000_000L
         private const val RCS_CHAT_ID_OFFSET = 2_000_000_000L
         private const val RCS_FT_ID_OFFSET = 3_000_000_000L
+    }
+
+    /**
+     * 로컬 Room DB의 `sms_cache`를 활용하여 기존 문자는 즉시 표시하고,
+     * 가장 마지막에 캐시된 시각(`maxCachedTs`) 이후의 신규 문자(SMS/MMS/RCS)만 증분 조회하여 추가합니다.
+     */
+    suspend fun refreshSmsCache(db: AppDatabase, lastSmsWatermarkTs: Long) {
+        val dao = db.syncCacheDao()
+        val maxCachedTs = dao.getMaxSmsTs() ?: 0L
+        val newItems = collectSmsSince(maxCachedTs)
+        if (newItems.isNotEmpty()) {
+            val entities = newItems.map { item ->
+                SmsCacheEntity(
+                    id = item.id,
+                    address = item.address,
+                    body = item.body,
+                    ts = item.ts,
+                    type = item.type,
+                    isSynced = lastSmsWatermarkTs > 0L && item.ts <= lastSmsWatermarkTs
+                )
+            }
+            dao.insertSmsList(entities)
+        }
+        if (lastSmsWatermarkTs > 0L) {
+            dao.markSmsSyncedUpTo(lastSmsWatermarkTs)
+        }
     }
 
     /**

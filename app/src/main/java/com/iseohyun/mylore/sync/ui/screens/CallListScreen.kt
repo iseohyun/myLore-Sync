@@ -16,9 +16,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.iseohyun.mylore.sync.collector.CallLogCollector
 import com.iseohyun.mylore.sync.collector.CallRecordingCollector
-import com.iseohyun.mylore.sync.collector.CallRecordingInfo
+import com.iseohyun.mylore.sync.data.local.AppDatabase
 import com.iseohyun.mylore.sync.data.prefs.AppPreferences
-import com.iseohyun.mylore.sync.data.remote.dto.SyncCallLogItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
@@ -30,28 +29,33 @@ fun CallListScreen(
     onOpenDrawer: () -> Unit
 ) {
     val context = LocalContext.current
-    var callLogs by remember { mutableStateOf<List<SyncCallLogItem>>(emptyList()) }
-    var recordings by remember { mutableStateOf<List<CallRecordingInfo>>(emptyList()) }
-    var isLoading by remember { mutableStateOf(true) }
+    val db = remember { AppDatabase.getInstance(context) }
+
+    // 1. 기존 캐시된 통화 이력 및 녹음 파일 목록 즉시 렌더링 (0ms)
+    val callLogs by db.syncCacheDao().getAllCallLogsFlow().collectAsState(initial = emptyList())
+    val recordings by db.syncCacheDao().getAllRecordingsFlow().collectAsState(initial = emptyList())
     val lastCallTs by appPreferences.lastCallTs.collectAsState(initial = 0L)
+    val lastRecordingTs by appPreferences.lastRecordingTs.collectAsState(initial = 0L)
+    var isRefreshing by remember { mutableStateOf(true) }
 
-    LaunchedEffect(Unit) {
+    // 2. 백그라운드 지연 업데이트: 새로 추가된 통화 및 변경된 녹음 파일만 증분 스캔
+    LaunchedEffect(lastCallTs, lastRecordingTs) {
+        isRefreshing = true
         withContext(Dispatchers.IO) {
-            val logCollector = CallLogCollector(context)
-            callLogs = logCollector.collectCallLogsSince(0L).reversed()
-
-            val recCollector = CallRecordingCollector()
-            recordings = recCollector.scanCallRecordings()
-
-            isLoading = false
+            CallLogCollector(context).refreshCallLogCache(db, lastCallTs)
+            CallRecordingCollector().refreshRecordingsCache(db, lastRecordingTs)
         }
+        isRefreshing = false
     }
 
     val dateFormat = remember { SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.KOREA) }
 
-    // 음성파일 중 아직 서버 기준(lastCallTs) 이후인 가장 오래된 시점
-    val pendingRecordings = recordings.filter { it.recordedAt > lastCallTs }
-    val oldestPendingVoiceTs = pendingRecordings.minOfOrNull { it.recordedAt }
+    val pendingRecordings = remember(recordings, lastRecordingTs) {
+        recordings.filter { !it.isSynced && it.recordedAt > lastRecordingTs }
+    }
+    val oldestPendingVoiceTs = remember(pendingRecordings) {
+        pendingRecordings.minOfOrNull { it.recordedAt }
+    }
 
     Column(
         modifier = Modifier
@@ -62,13 +66,25 @@ fun CallListScreen(
         // Top Header
         Row(
             modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(onClick = onOpenDrawer) {
-                Text("☰", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onOpenDrawer) {
+                    Text("☰", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("통화 기록 및 녹음 동기화", fontSize = 20.sp, fontWeight = FontWeight.Bold)
             }
-            Spacer(modifier = Modifier.width(8.dp))
-            Text("통화 기록 및 녹음 동기화", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+
+            if (isRefreshing) {
+                Text(
+                    "🔄 추가 통화 확인 중...",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Medium
+                )
+            }
         }
 
         Spacer(modifier = Modifier.height(12.dp))
@@ -100,7 +116,7 @@ fun CallListScreen(
 
         Spacer(modifier = Modifier.height(14.dp))
 
-        if (isLoading) {
+        if (callLogs.isEmpty() && isRefreshing) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator()
             }
@@ -113,12 +129,11 @@ fun CallListScreen(
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                items(callLogs) { item ->
-                    val isLogSynced = item.ts <= lastCallTs
-                    // 통화 번호 또는 시간 기반 매칭 녹음 파일 탐색
-                    val hasVoiceFile = recordings.any { rec ->
-                        (rec.phoneNumber.isNotBlank() && item.number.contains(rec.phoneNumber)) ||
-                                (Math.abs(rec.recordedAt - item.ts) < 120_000L)
+                items(callLogs, key = { it.id }) { item ->
+                    val isLogSynced = item.isSynced || (lastCallTs > 0L && item.ts <= lastCallTs)
+                    val matchedVoice = recordings.firstOrNull { rec ->
+                        (rec.phoneNumber.isNotBlank() && item.number.contains(rec.phoneNumber)) &&
+                                (Math.abs(rec.recordedAt - item.ts) < 300_000L)
                     }
 
                     Card(
@@ -152,7 +167,6 @@ fun CallListScreen(
                                 }
 
                                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    // 통화기록 전송 배지
                                     Box(
                                         modifier = Modifier
                                             .background(
@@ -169,17 +183,20 @@ fun CallListScreen(
                                         )
                                     }
 
-                                    // 통화음성파일 배지
-                                    if (hasVoiceFile) {
+                                    if (matchedVoice != null) {
+                                        val isVoiceSynced = matchedVoice.isSynced || (lastRecordingTs > 0L && matchedVoice.recordedAt <= lastRecordingTs)
                                         Box(
                                             modifier = Modifier
-                                                .background(Color(0xFFE1F5FE), RoundedCornerShape(4.dp))
+                                                .background(
+                                                    if (isVoiceSynced) Color(0xFFE1F5FE) else Color(0xFFFFF3E0),
+                                                    RoundedCornerShape(4.dp)
+                                                )
                                                 .padding(horizontal = 5.dp, vertical = 2.dp)
                                         ) {
                                             Text(
-                                                "🎙️음성보유",
+                                                if (isVoiceSynced) "🎙️음성전송됨" else "🎙️음성대기",
                                                 fontSize = 10.sp,
-                                                color = Color(0xFF0277BD),
+                                                color = if (isVoiceSynced) Color(0xFF0277BD) else Color(0xFFE65100),
                                                 fontWeight = FontWeight.Medium
                                             )
                                         }

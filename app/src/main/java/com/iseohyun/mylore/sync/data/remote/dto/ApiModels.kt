@@ -28,6 +28,67 @@ data class SyncWatermarksRequest(
     @SerializedName("last_usage_ts") val lastUsageTs: Long
 )
 
+/**
+ * 카톡 대화방별 전송 요약 정보 (전송 후 삭제된 대화방의 최신 대화 시각 및 공유 시각 유지용)
+ */
+data class ServerKakaoRoomInfo(
+    @SerializedName("room_name") val roomName: String = "",
+    @SerializedName("folder_name") val folderName: String = "",
+    @SerializedName("last_message") val lastMessage: String = "",
+    @SerializedName("last_message_ts") val lastMessageTs: Long = 0L,
+    @SerializedName("last_shared_ts") val lastSharedTs: Long = 0L,
+    @SerializedName("total_bytes") val totalBytes: Long = 0L,
+    @SerializedName("synced_bytes") val syncedBytes: Long = 0L
+)
+
+/**
+ * 헬스 데이터 전송 요약 정보 (전송 후 삭제된 헬스 백업의 최신 운동 종류 및 마지막 시각 유지용)
+ */
+data class ServerHealthRecordInfo(
+    @SerializedName("folder_name") val folderName: String = "",
+    @SerializedName("latest_record_type") val latestRecordType: String = "삼성 헬스 운동/생체 데이터",
+    @SerializedName("last_data_ts") val lastDataTs: Long = 0L,
+    @SerializedName("last_shared_ts") val lastSharedTs: Long = 0L,
+    @SerializedName("csv_count") val csvCount: Int = 0,
+    @SerializedName("json_count") val jsonCount: Int = 0,
+    @SerializedName("total_size_kb") val totalSizeKb: Long = 0L
+)
+
+/**
+ * 유휴 시점(모든 전송 완료 후) 모바일 ➔ 서버 전송 목록 상호 동기화 요청
+ */
+data class SyncReconcileRequest(
+    @SerializedName("last_kakao_ts") val lastKakaoTs: Long = 0L,
+    @SerializedName("last_sms_ts") val lastSmsTs: Long = 0L,
+    @SerializedName("last_call_ts") val lastCallTs: Long = 0L,
+    @SerializedName("last_noti_ts") val lastNotiTs: Long = 0L,
+    @SerializedName("last_recording_ts") val lastRecordingTs: Long = 0L,
+    @SerializedName("last_health_ts") val lastHealthTs: Long = 0L,
+    @SerializedName("local_kakao_rooms") val localKakaoRooms: List<ServerKakaoRoomInfo> = emptyList(),
+    @SerializedName("local_health_records") val localHealthRecords: List<ServerHealthRecordInfo> = emptyList(),
+    @SerializedName("local_recording_hashes") val localRecordingHashes: List<String> = emptyList()
+)
+
+/**
+ * 서버가 보유한 전체 동기화 목록 요약(Manifest) 응답
+ * - 모바일 앱이 빠른 초기 로딩 및 유휴 시점 서버-단말 간 싱크 정합성을 맞추는 데 사용
+ */
+data class SyncManifestResponse(
+    @SerializedName("ok") val ok: Boolean = false,
+    @SerializedName("last_kakao_ts") val lastKakaoTs: Long = 0L,
+    @SerializedName("last_sms_ts") val lastSmsTs: Long = 0L,
+    @SerializedName("last_call_ts") val lastCallTs: Long = 0L,
+    @SerializedName("last_noti_ts") val lastNotiTs: Long = 0L,
+    @SerializedName("last_recording_ts") val lastRecordingTs: Long = 0L,
+    @SerializedName("last_health_ts") val lastHealthTs: Long = 0L,
+    @SerializedName("kakao_rooms") val kakaoRooms: List<ServerKakaoRoomInfo> = emptyList(),
+    @SerializedName("health_records") val healthRecords: List<ServerHealthRecordInfo> = emptyList(),
+    @SerializedName("synced_recording_hashes") val syncedRecordingHashes: List<String> = emptyList(),
+    @SerializedName("synced_sms_ids") val syncedSmsIds: List<Long> = emptyList(),
+    @SerializedName("synced_call_ids") val syncedCallIds: List<Long> = emptyList(),
+    @SerializedName("synced_noti_ids") val syncedNotiIds: List<Long> = emptyList()
+)
+
 data class BatchInitRequest(
     @SerializedName("service") val service: String,
     @SerializedName("total_count") val totalCount: Int

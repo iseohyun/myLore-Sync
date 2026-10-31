@@ -6,14 +6,22 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import com.iseohyun.mylore.sync.data.local.dao.BusinessCardDao
 import com.iseohyun.mylore.sync.data.local.dao.NotificationDao
+import com.iseohyun.mylore.sync.data.local.dao.SyncCacheDao
 import com.iseohyun.mylore.sync.data.local.dao.SyncLogDao
-import com.iseohyun.mylore.sync.data.local.entity.BusinessCardEntity
-import com.iseohyun.mylore.sync.data.local.entity.NotificationEntity
-import com.iseohyun.mylore.sync.data.local.entity.SyncLogEntity
+import com.iseohyun.mylore.sync.data.local.entity.*
 
 @Database(
-    entities = [NotificationEntity::class, SyncLogEntity::class, BusinessCardEntity::class],
-    version = 2,
+    entities = [
+        NotificationEntity::class,
+        SyncLogEntity::class,
+        BusinessCardEntity::class,
+        KakaoRoomCacheEntity::class,
+        SmsCacheEntity::class,
+        CallLogCacheEntity::class,
+        RecordingCacheEntity::class,
+        HealthSyncCacheEntity::class
+    ],
+    version = 3,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -21,6 +29,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun notificationDao(): NotificationDao
     abstract fun syncLogDao(): SyncLogDao
     abstract fun businessCardDao(): BusinessCardDao
+    abstract fun syncCacheDao(): SyncCacheDao
 
     companion object {
         @Volatile
