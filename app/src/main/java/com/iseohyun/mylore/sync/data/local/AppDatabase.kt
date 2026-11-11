@@ -7,6 +7,7 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.iseohyun.mylore.sync.data.local.dao.BusinessCardDao
+import com.iseohyun.mylore.sync.data.local.dao.HealthGpsDao
 import com.iseohyun.mylore.sync.data.local.dao.NotificationDao
 import com.iseohyun.mylore.sync.data.local.dao.SyncCacheDao
 import com.iseohyun.mylore.sync.data.local.dao.SyncLogDao
@@ -22,9 +23,11 @@ import com.iseohyun.mylore.sync.data.local.entity.*
         CallLogCacheEntity::class,
         RecordingCacheEntity::class,
         HealthSyncCacheEntity::class,
-        PhotoMediaCacheEntity::class
+        PhotoMediaCacheEntity::class,
+        HealthGpsPointEntity::class,
+        HealthGpsDaySummaryEntity::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -33,6 +36,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun syncLogDao(): SyncLogDao
     abstract fun businessCardDao(): BusinessCardDao
     abstract fun syncCacheDao(): SyncCacheDao
+    abstract fun healthGpsDao(): HealthGpsDao
 
     companion object {
         @Volatile
@@ -69,6 +73,44 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `health_gps_points` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`date` TEXT NOT NULL, " +
+                        "`timestamp` INTEGER NOT NULL, " +
+                        "`latitude` REAL NOT NULL, " +
+                        "`longitude` REAL NOT NULL, " +
+                        "`altitude` REAL NOT NULL, " +
+                        "`isStayPoint` INTEGER NOT NULL, " +
+                        "`stayDurationMinutes` INTEGER NOT NULL, " +
+                        "`stayStartTime` INTEGER NOT NULL, " +
+                        "`stayEndTime` INTEGER NOT NULL, " +
+                        "`sourceFileName` TEXT NOT NULL)"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_health_gps_points_date` ON `health_gps_points` (`date`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_health_gps_points_timestamp` ON `health_gps_points` (`timestamp`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_health_gps_points_isStayPoint` ON `health_gps_points` (`isStayPoint`)")
+
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `health_gps_day_summaries` (" +
+                        "`date` TEXT PRIMARY KEY NOT NULL, " +
+                        "`pointCount` INTEGER NOT NULL, " +
+                        "`startTime` INTEGER NOT NULL, " +
+                        "`endTime` INTEGER NOT NULL, " +
+                        "`totalDistanceMeters` REAL NOT NULL, " +
+                        "`stayCount` INTEGER NOT NULL, " +
+                        "`totalStayDurationMinutes` INTEGER NOT NULL, " +
+                        "`centerLat` REAL NOT NULL, " +
+                        "`centerLng` REAL NOT NULL, " +
+                        "`updatedAt` INTEGER NOT NULL)"
+                )
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_health_gps_day_summaries_date` ON `health_gps_day_summaries` (`date`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_health_gps_day_summaries_startTime` ON `health_gps_day_summaries` (`startTime`)")
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -76,7 +118,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "mylore_sync.db"
                 )
-                    .addMigrations(MIGRATION_3_4, MIGRATION_4_5)
+                    .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                     .fallbackToDestructiveMigration()
                     .build()
                 INSTANCE = instance

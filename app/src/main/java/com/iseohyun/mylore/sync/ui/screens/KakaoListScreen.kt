@@ -64,6 +64,14 @@ fun KakaoListScreen(
         if (totalCapacity > 0) ((totalSynced.toDouble() / totalCapacity) * 100).toInt().coerceIn(0, 100) else 100
     }
 
+    // 마지막 대화 일시(없으면 공유 시각) 기준으로 오늘 / 이번주 / 이번달 / 연도(2026, 2025...) 그룹화
+    val timeGroups = remember(roomList) {
+        groupItemsByTimeSplit(roomList) { room ->
+            if (room.lastMessageTime > 0L) room.lastMessageTime else room.lastSharedTime
+        }
+    }
+    var collapsedKeys by remember { mutableStateOf(setOf<String>()) }
+
     val columns = remember {
         listOf(
             TableColumnSpec("이름", 0.25f, TextAlign.Start),
@@ -154,7 +162,19 @@ fun KakaoListScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(6.dp))
+
+        TimeSplitTabControlBar(
+            groups = timeGroups,
+            collapsedKeys = collapsedKeys,
+            onToggleGroup = { key ->
+                collapsedKeys = if (collapsedKeys.contains(key)) collapsedKeys - key else collapsedKeys + key
+            },
+            onExpandAll = { collapsedKeys = emptySet() },
+            onCollapseAll = { collapsedKeys = timeGroups.map { it.key }.toSet() }
+        )
+
+        Spacer(modifier = Modifier.height(6.dp))
 
         if (roomList.isEmpty() && isRefreshing) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -179,82 +199,106 @@ fun KakaoListScreen(
                         StickyTableHeader(columns = columns)
                     }
 
-                    itemsIndexed(roomList, key = { _, item -> item.roomName }) { index, room ->
-                        val isDefinitelySynced = !room.isOnDevice || room.percent >= 100 || room.lastSharedTime > 0L
-                        val effectiveSharedTime = when {
-                            room.lastSharedTime > 0L -> room.lastSharedTime
-                            isDefinitelySynced -> verifiedTimeMs
-                            else -> 0L
-                        }
+                    timeGroups.forEach { group ->
+                        val isExpanded = !collapsedKeys.contains(group.key)
 
-                        val pcShareText = when {
-                            !room.isOnDevice -> "완료(정리됨)"
-                            room.percent >= 100 -> "100% (${KakaoChatFolderWatcher.formatFileSize(room.totalBytes)})"
-                            room.percent > 0 -> "${room.percent}% (${KakaoChatFolderWatcher.formatFileSize(room.syncedBytes)})"
-                            room.totalBytes > 0L -> if (effectiveSharedTime > 0L) "공유됨" else "-"
-                            else -> if (effectiveSharedTime > 0L) "완료" else "-"
-                        }
-
-                        val rowBg = if (index % 2 == 0) {
-                            MaterialTheme.colorScheme.surface
-                        } else {
-                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
-                        }
-
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(rowBg)
-                                .padding(horizontal = 8.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = room.roomName.ifBlank { "-" },
-                                modifier = Modifier
-                                    .weight(columns[0].weight)
-                                    .padding(horizontal = 2.dp),
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis
-                            )
-
-                            Text(
-                                text = formatTableDateTime(room.lastMessageTime),
-                                modifier = Modifier
-                                    .weight(columns[1].weight)
-                                    .padding(horizontal = 2.dp),
-                                fontSize = 11.sp,
-                                textAlign = TextAlign.Center,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-
-                            Text(
-                                text = pcShareText,
-                                modifier = Modifier
-                                    .weight(columns[2].weight)
-                                    .padding(horizontal = 2.dp),
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Medium,
-                                textAlign = TextAlign.Center,
-                                color = if (effectiveSharedTime > 0L) Color(0xFF2E7D32) else MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-
-                            Text(
-                                text = formatTableDateTime(effectiveSharedTime),
-                                modifier = Modifier
-                                    .weight(columns[3].weight)
-                                    .padding(horizontal = 2.dp),
-                                fontSize = 11.sp,
-                                fontWeight = if (effectiveSharedTime > 0L) FontWeight.SemiBold else FontWeight.Normal,
-                                textAlign = TextAlign.Center,
-                                color = if (effectiveSharedTime > 0L) Color(0xFF2E7D32) else MaterialTheme.colorScheme.outline
+                        item(key = "split_${group.key}") {
+                            TimeSplitSectionHeader(
+                                title = group.title,
+                                count = group.items.size,
+                                isExpanded = isExpanded,
+                                onToggle = {
+                                    collapsedKeys = if (isExpanded) {
+                                        collapsedKeys + group.key
+                                    } else {
+                                        collapsedKeys - group.key
+                                    }
+                                }
                             )
                         }
-                        HorizontalDivider(
-                            thickness = 0.5.dp,
-                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
-                        )
+
+                        if (isExpanded) {
+                            itemsIndexed(
+                                items = group.items,
+                                key = { _, item -> "${group.key}_${item.roomName}" }
+                            ) { index, room ->
+                                val isDefinitelySynced = !room.isOnDevice || room.percent >= 100 || room.lastSharedTime > 0L
+                                val effectiveSharedTime = when {
+                                    room.lastSharedTime > 0L -> room.lastSharedTime
+                                    isDefinitelySynced -> verifiedTimeMs
+                                    else -> 0L
+                                }
+
+                                val pcShareText = when {
+                                    !room.isOnDevice -> "완료(정리됨)"
+                                    room.percent >= 100 -> "100% (${KakaoChatFolderWatcher.formatFileSize(room.totalBytes)})"
+                                    room.percent > 0 -> "${room.percent}% (${KakaoChatFolderWatcher.formatFileSize(room.syncedBytes)})"
+                                    room.totalBytes > 0L -> if (effectiveSharedTime > 0L) "공유됨" else "-"
+                                    else -> if (effectiveSharedTime > 0L) "완료" else "-"
+                                }
+
+                                val rowBg = if (index % 2 == 0) {
+                                    MaterialTheme.colorScheme.surface
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                                }
+
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(rowBg)
+                                        .padding(horizontal = 8.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = room.roomName.ifBlank { "-" },
+                                        modifier = Modifier
+                                            .weight(columns[0].weight)
+                                            .padding(horizontal = 2.dp),
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+
+                                    Text(
+                                        text = formatTableDateTime(room.lastMessageTime),
+                                        modifier = Modifier
+                                            .weight(columns[1].weight)
+                                            .padding(horizontal = 2.dp),
+                                        fontSize = 11.sp,
+                                        textAlign = TextAlign.Center,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+
+                                    Text(
+                                        text = pcShareText,
+                                        modifier = Modifier
+                                            .weight(columns[2].weight)
+                                            .padding(horizontal = 2.dp),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        textAlign = TextAlign.Center,
+                                        color = if (effectiveSharedTime > 0L) Color(0xFF2E7D32) else MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+
+                                    Text(
+                                        text = formatTableDateTime(effectiveSharedTime),
+                                        modifier = Modifier
+                                            .weight(columns[3].weight)
+                                            .padding(horizontal = 2.dp),
+                                        fontSize = 11.sp,
+                                        fontWeight = if (effectiveSharedTime > 0L) FontWeight.SemiBold else FontWeight.Normal,
+                                        textAlign = TextAlign.Center,
+                                        color = if (effectiveSharedTime > 0L) Color(0xFF2E7D32) else MaterialTheme.colorScheme.outline
+                                    )
+                                }
+                                HorizontalDivider(
+                                    thickness = 0.5.dp,
+                                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                                )
+                            }
+                        }
                     }
                 }
             }

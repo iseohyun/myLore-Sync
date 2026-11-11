@@ -67,6 +67,11 @@ fun SmsListScreen(
         smsList.count { it.syncedAt <= 0L && !it.isSynced && (lastSmsTs <= 0L || it.ts > lastSmsTs) }
     }
 
+    val timeGroups = remember(smsList) {
+        groupItemsByTimeSplit(smsList) { it.ts }
+    }
+    var collapsedKeys by remember { mutableStateOf(setOf<String>()) }
+
     val columns = remember {
         listOf(
             TableColumnSpec("송수신", 0.14f, TextAlign.Center),
@@ -130,7 +135,19 @@ fun SmsListScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(6.dp))
+
+        TimeSplitTabControlBar(
+            groups = timeGroups,
+            collapsedKeys = collapsedKeys,
+            onToggleGroup = { key ->
+                collapsedKeys = if (collapsedKeys.contains(key)) collapsedKeys - key else collapsedKeys + key
+            },
+            onExpandAll = { collapsedKeys = emptySet() },
+            onCollapseAll = { collapsedKeys = timeGroups.map { it.key }.toSet() }
+        )
+
+        Spacer(modifier = Modifier.height(6.dp))
 
         if (smsList.isEmpty() && isRefreshing) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -151,85 +168,109 @@ fun SmsListScreen(
                         StickyTableHeader(columns = columns)
                     }
 
-                    itemsIndexed(smsList, key = { _, item -> item.id }) { index, item ->
-                        val isDefinitelySynced =
-                            item.syncedAt > 0L || item.isSynced || (lastSmsTs > 0L && item.ts <= lastSmsTs)
-                        val effectiveSyncedAt = when {
-                            item.syncedAt > 0L -> item.syncedAt
-                            isDefinitelySynced -> verifiedTimeMs
-                            else -> 0L
-                        }
+                    timeGroups.forEach { group ->
+                        val isExpanded = !collapsedKeys.contains(group.key)
 
-                        val dirLabel = when (item.type) {
-                            "sent" -> "송신"
-                            "inbox" -> "수신"
-                            else -> "-"
-                        }
-                        val targetLabel = resolveContactOrPhone(
-                            rawPhoneOrAddress = item.address,
-                            contactMap = contactMap
-                        )
-
-                        val rowBg = if (index % 2 == 0) {
-                            MaterialTheme.colorScheme.surface
-                        } else {
-                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
-                        }
-
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(rowBg)
-                                .padding(horizontal = 8.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = dirLabel,
-                                modifier = Modifier
-                                    .weight(columns[0].weight)
-                                    .padding(horizontal = 2.dp),
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                textAlign = TextAlign.Center,
-                                color = if (dirLabel == "송신") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary
-                            )
-
-                            Text(
-                                text = targetLabel,
-                                modifier = Modifier
-                                    .weight(columns[1].weight)
-                                    .padding(horizontal = 2.dp),
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Medium,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-
-                            Text(
-                                text = formatTableDateTime(item.ts),
-                                modifier = Modifier
-                                    .weight(columns[2].weight)
-                                    .padding(horizontal = 2.dp),
-                                fontSize = 11.sp,
-                                textAlign = TextAlign.Center,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-
-                            Text(
-                                text = formatTableDateTime(effectiveSyncedAt),
-                                modifier = Modifier
-                                    .weight(columns[3].weight)
-                                    .padding(horizontal = 2.dp),
-                                fontSize = 11.sp,
-                                fontWeight = if (effectiveSyncedAt > 0L) FontWeight.SemiBold else FontWeight.Normal,
-                                textAlign = TextAlign.Center,
-                                color = if (effectiveSyncedAt > 0L) Color(0xFF2E7D32) else MaterialTheme.colorScheme.outline
+                        item(key = "split_${group.key}") {
+                            TimeSplitSectionHeader(
+                                title = group.title,
+                                count = group.items.size,
+                                isExpanded = isExpanded,
+                                onToggle = {
+                                    collapsedKeys = if (isExpanded) {
+                                        collapsedKeys + group.key
+                                    } else {
+                                        collapsedKeys - group.key
+                                    }
+                                }
                             )
                         }
-                        HorizontalDivider(
-                            thickness = 0.5.dp,
-                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
-                        )
+
+                        if (isExpanded) {
+                            itemsIndexed(
+                                items = group.items,
+                                key = { _, item -> "${group.key}_${item.id}" }
+                            ) { index, item ->
+                                val isDefinitelySynced =
+                                    item.syncedAt > 0L || item.isSynced || (lastSmsTs > 0L && item.ts <= lastSmsTs)
+                                val effectiveSyncedAt = when {
+                                    item.syncedAt > 0L -> item.syncedAt
+                                    isDefinitelySynced -> verifiedTimeMs
+                                    else -> 0L
+                                }
+
+                                val dirLabel = when (item.type) {
+                                    "sent" -> "송신"
+                                    "inbox" -> "수신"
+                                    else -> "-"
+                                }
+                                val targetLabel = resolveContactOrPhone(
+                                    rawPhoneOrAddress = item.address,
+                                    contactMap = contactMap
+                                )
+
+                                val rowBg = if (index % 2 == 0) {
+                                    MaterialTheme.colorScheme.surface
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                                }
+
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(rowBg)
+                                        .padding(horizontal = 8.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = dirLabel,
+                                        modifier = Modifier
+                                            .weight(columns[0].weight)
+                                            .padding(horizontal = 2.dp),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        textAlign = TextAlign.Center,
+                                        color = if (dirLabel == "송신") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary
+                                    )
+
+                                    Text(
+                                        text = targetLabel,
+                                        modifier = Modifier
+                                            .weight(columns[1].weight)
+                                            .padding(horizontal = 2.dp),
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+
+                                    Text(
+                                        text = formatTableDateTime(item.ts),
+                                        modifier = Modifier
+                                            .weight(columns[2].weight)
+                                            .padding(horizontal = 2.dp),
+                                        fontSize = 11.sp,
+                                        textAlign = TextAlign.Center,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+
+                                    Text(
+                                        text = formatTableDateTime(effectiveSyncedAt),
+                                        modifier = Modifier
+                                            .weight(columns[3].weight)
+                                            .padding(horizontal = 2.dp),
+                                        fontSize = 11.sp,
+                                        fontWeight = if (effectiveSyncedAt > 0L) FontWeight.SemiBold else FontWeight.Normal,
+                                        textAlign = TextAlign.Center,
+                                        color = if (effectiveSyncedAt > 0L) Color(0xFF2E7D32) else MaterialTheme.colorScheme.outline
+                                    )
+                                }
+                                HorizontalDivider(
+                                    thickness = 0.5.dp,
+                                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                                )
+                            }
+                        }
                     }
                 }
             }

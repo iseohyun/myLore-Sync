@@ -10,6 +10,8 @@ import android.os.Environment
 import android.os.PowerManager
 import android.provider.Settings
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -17,6 +19,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -45,6 +48,8 @@ fun SettingsScreen(
     val pairingToken by appPreferences.pairingToken.collectAsState(initial = "")
     val serverSsid by appPreferences.serverSsid.collectAsState(initial = "")
     val serverWifiPw by appPreferences.serverWifiPw.collectAsState(initial = "")
+    val googleMapsApiKey by appPreferences.googleMapsApiKey.collectAsState(initial = "")
+    var apiKeyInput by remember(googleMapsApiKey) { mutableStateOf(googleMapsApiKey) }
 
     // 권한 실시간 체크 상태
     fun checkPermissionsState(): Map<String, Boolean> {
@@ -59,7 +64,13 @@ fun SettingsScreen(
         val smsAllowed = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED
         val callAllowed = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CALL_LOG) == PackageManager.PERMISSION_GRANTED
         val locationAllowed = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        val bgLocationAllowed = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            locationAllowed && ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED
+        } else {
+            locationAllowed
+        }
         val cameraAllowed = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        val recordAudioAllowed = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
 
         val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
         val batteryAllowed = powerManager?.isIgnoringBatteryOptimizations(context.packageName) == true
@@ -72,12 +83,26 @@ fun SettingsScreen(
             "문자(SMS/MMS) 권한" to smsAllowed,
             "통화 기록 권한" to callAllowed,
             "위치(Wi-Fi 감지) 권한" to locationAllowed,
+            "위치 [항상 허용] (지도앱/외출 GPS)" to bgLocationAllowed,
             "카메라(명함/QR) 권한" to cameraAllowed,
+            "마이크(모바일 음성 채취) 권한" to recordAudioAllowed,
             "배터리 최적화 예외" to batteryAllowed
         )
     }
 
     var permStates by remember { mutableStateOf(checkPermissionsState()) }
+    var showVoiceCaptureDialog by rememberSaveable { mutableStateOf(false) }
+
+    val audioPermLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        permStates = checkPermissionsState()
+        if (granted) {
+            showVoiceCaptureDialog = true
+        } else {
+            Toast.makeText(context, "음성 채취를 위해 마이크 권한이 필요합니다.", Toast.LENGTH_SHORT).show()
+        }
+    }
 
     LaunchedEffect(Unit) {
         permStates = checkPermissionsState()
@@ -179,7 +204,50 @@ fun SettingsScreen(
 
         Spacer(modifier = Modifier.height(20.dp))
 
-        // Section 2: Server Wi-Fi (NAT) Connection
+        // Section 2: Google Maps SDK 설정 안내
+        Text("🔑 Google Maps SDK 설정 안내", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+        Text(
+            "공식 Google Maps SDK for Android 엔진이 활성화되어 있으며, 패키지 이름 및 SHA-1 인증서 지문 제한이 걸린 API 키와 호환됩니다.",
+            fontSize = 13.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                OutlinedTextField(
+                    value = apiKeyInput,
+                    onValueChange = { apiKeyInput = it },
+                    label = { Text("등록된 Google Maps API Key") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    "• 패키지명: com.iseohyun.mylore.sync\n" +
+                    "• SHA-1: CD:E1:54:A3:B1:A3:C5:4F:AC:7E:8F:AE:F1:CD:E2:E7:53:7B:34:D7\n" +
+                    "• 필수 활성화 API: Maps SDK for Android",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                Button(
+                    onClick = {
+                        scope.launch {
+                            appPreferences.updateGoogleMapsApiKey(apiKeyInput)
+                            Toast.makeText(context, "Google Maps API 키가 저장되었습니다.", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("💾 API Key 저장")
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(20.dp))
+
+        // Section 3: Server Wi-Fi (NAT) Connection
         Text("서버 소속 Wi-Fi (NAT)", fontWeight = FontWeight.Bold, fontSize = 16.sp)
         Text("QR 코드 페어링 시 전달받은 서버 소속 공유기(Wi-Fi) 정보입니다.", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(modifier = Modifier.height(8.dp))
@@ -228,7 +296,7 @@ fun SettingsScreen(
 
         Spacer(modifier = Modifier.height(20.dp))
 
-        // Section 3: Connection & Unpair
+        // Section 4: Connection & Unpair
         Text("연결 정보", fontWeight = FontWeight.Bold, fontSize = 16.sp)
         Spacer(modifier = Modifier.height(8.dp))
 
@@ -255,8 +323,53 @@ fun SettingsScreen(
             }
         }
 
+        Spacer(modifier = Modifier.height(20.dp))
+
+        // Section 5: Mobile Voiceprint Capture (서버 연동 모바일 음성 채취)
+        Text("모바일 음성지문 채취 (서버 연동)", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+        Text(
+            "PC 모니터에 표시된 문구를 실제 통화 자세로 읽고 서버(2종 오픈소스 CAM++ & ResNet34)로 전송합니다. 스피커 모드가 아닐 때는 화면에 볼이 닿아도 동작하지 않습니다.",
+            fontSize = 13.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                Button(
+                    onClick = {
+                        if (pcIp.isBlank()) {
+                            Toast.makeText(context, "먼저 PC 서버와 페어링이 필요합니다.", Toast.LENGTH_SHORT).show()
+                            return@Button
+                        }
+                        val hasMic = ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.RECORD_AUDIO
+                        ) == PackageManager.PERMISSION_GRANTED
+                        if (hasMic) {
+                            showVoiceCaptureDialog = true
+                        } else {
+                            audioPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("🎙️ 모바일 음성 채취하기", fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+
         Spacer(modifier = Modifier.height(24.dp))
         }
+    }
+
+    if (showVoiceCaptureDialog) {
+        MobileVoiceCaptureDialog(
+            pcIp = pcIp,
+            pcPort = pcPort,
+            pairingToken = pairingToken,
+            onDismiss = { showVoiceCaptureDialog = false }
+        )
     }
 }
 

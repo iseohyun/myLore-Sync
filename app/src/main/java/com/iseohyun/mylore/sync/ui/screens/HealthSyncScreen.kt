@@ -116,6 +116,11 @@ fun HealthSyncScreen(
     val activeFolders = remember(healthRecords) { healthRecords.filter { it.isOnDevice } }
     val latestSyncedRecord = remember(healthRecords) { healthRecords.maxByOrNull { it.lastDataTime } }
 
+    val timeGroups = remember(healthRecords) {
+        groupItemsByTimeSplit(healthRecords) { it.lastDataTime }
+    }
+    var collapsedKeys by remember { mutableStateOf(setOf<String>()) }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -146,7 +151,7 @@ fun HealthSyncScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(10.dp))
 
         // Status Card
         Card(
@@ -178,7 +183,7 @@ fun HealthSyncScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
         if (activeFolders.isNotEmpty()) {
             Button(
@@ -189,8 +194,20 @@ fun HealthSyncScreen(
             ) {
                 Text("🗑️ 모든 헬스 데이터 전송 완료 후 기기에서 삭제 (이력 유지)")
             }
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(8.dp))
         }
+
+        TimeSplitTabControlBar(
+            groups = timeGroups,
+            collapsedKeys = collapsedKeys,
+            onToggleGroup = { key ->
+                collapsedKeys = if (collapsedKeys.contains(key)) collapsedKeys - key else collapsedKeys + key
+            },
+            onExpandAll = { collapsedKeys = emptySet() },
+            onCollapseAll = { collapsedKeys = timeGroups.map { it.key }.toSet() }
+        )
+
+        Spacer(modifier = Modifier.height(6.dp))
 
         if (healthRecords.isEmpty() && isRefreshing) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -211,68 +228,92 @@ fun HealthSyncScreen(
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                items(healthRecords, key = { it.folderName }) { item ->
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-                    ) {
-                        Column(modifier = Modifier.padding(14.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    item.folderName,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 14.sp,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                Box(
-                                    modifier = Modifier
-                                        .background(
-                                            if (!item.isOnDevice || item.isSynced) Color(0xFFE8F5E9) else Color(0xFFE3F2FD),
-                                            RoundedCornerShape(8.dp)
-                                        )
-                                        .padding(horizontal = 8.dp, vertical = 3.dp)
-                                ) {
-                                    Text(
-                                        when {
-                                            !item.isOnDevice -> "✓ 전송 후 정리됨"
-                                            item.isSynced -> "✓ 전송 완료"
-                                            else -> "${item.totalSizeKb / 1024} MB 대기"
-                                        },
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (!item.isOnDevice || item.isSynced) Color(0xFF2E7D32) else Color(0xFF1565C0)
-                                    )
+                timeGroups.forEach { group ->
+                    val isExpanded = !collapsedKeys.contains(group.key)
+
+                    item(key = "split_${group.key}") {
+                        TimeSplitSectionHeader(
+                            title = group.title,
+                            count = group.items.size,
+                            isExpanded = isExpanded,
+                            onToggle = {
+                                collapsedKeys = if (isExpanded) {
+                                    collapsedKeys + group.key
+                                } else {
+                                    collapsedKeys - group.key
                                 }
                             }
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                "최신 파일 종류: ${item.latestRecordType}",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                            Text("• 운동 세션 및 걸음/수면 CSV: ${item.csvCount}개  |  • 워치 GPS/심박 JSON: ${item.jsonCount}개", fontSize = 12.sp)
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Row(
+                        )
+                    }
+
+                    if (isExpanded) {
+                        items(
+                            items = group.items,
+                            key = { "${group.key}_${it.folderName}" }
+                        ) { item ->
+                            Card(
                                 modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
                             ) {
-                                Text(
-                                    "마지막 데이터 시각: ${dateFormat.format(Date(item.lastDataTime))}",
-                                    fontSize = 11.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                if (item.lastSharedTime > 0L) {
+                                Column(modifier = Modifier.padding(14.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            item.folderName,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 14.sp,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        Box(
+                                            modifier = Modifier
+                                                .background(
+                                                    if (!item.isOnDevice || item.isSynced) Color(0xFFE8F5E9) else Color(0xFFE3F2FD),
+                                                    RoundedCornerShape(8.dp)
+                                                )
+                                                .padding(horizontal = 8.dp, vertical = 3.dp)
+                                        ) {
+                                            Text(
+                                                when {
+                                                    !item.isOnDevice -> "✓ 전송 후 정리됨"
+                                                    item.isSynced -> "✓ 전송 완료"
+                                                    else -> "${item.totalSizeKb / 1024} MB 대기"
+                                                },
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (!item.isOnDevice || item.isSynced) Color(0xFF2E7D32) else Color(0xFF1565C0)
+                                            )
+                                        }
+                                    }
+                                    Spacer(modifier = Modifier.height(6.dp))
                                     Text(
-                                        "공유 시각: ${dateFormat.format(Date(item.lastSharedTime))}",
-                                    fontSize = 11.sp,
-                                    color = MaterialTheme.colorScheme.tertiary
-                                )
-                            }
+                                        "최신 파일 종류: ${item.latestRecordType}",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                    Text("• 운동 세션 및 걸음/수면 CSV: ${item.csvCount}개  |  • 워치 GPS/심박 JSON: ${item.jsonCount}개", fontSize = 12.sp)
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(
+                                            "마지막 데이터 시각: ${dateFormat.format(Date(item.lastDataTime))}",
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        if (item.lastSharedTime > 0L) {
+                                            Text(
+                                                "공유 시각: ${dateFormat.format(Date(item.lastSharedTime))}",
+                                                fontSize = 11.sp,
+                                                color = MaterialTheme.colorScheme.tertiary
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

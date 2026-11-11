@@ -66,6 +66,11 @@ fun RecordingsListScreen(
         voiceRecordings.count { !it.isSynced && it.syncedAt <= 0L }
     }
 
+    val timeGroups = remember(voiceRecordings) {
+        groupItemsByTimeSplit(voiceRecordings) { it.recordedAt }
+    }
+    var collapsedKeys by remember { mutableStateOf(setOf<String>()) }
+
     val columns = remember {
         listOf(
             TableColumnSpec("파일명(구분)", 0.36f, TextAlign.Start),
@@ -135,7 +140,19 @@ fun RecordingsListScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(6.dp))
+
+        TimeSplitTabControlBar(
+            groups = timeGroups,
+            collapsedKeys = collapsedKeys,
+            onToggleGroup = { key ->
+                collapsedKeys = if (collapsedKeys.contains(key)) collapsedKeys - key else collapsedKeys + key
+            },
+            onExpandAll = { collapsedKeys = emptySet() },
+            onCollapseAll = { collapsedKeys = timeGroups.map { it.key }.toSet() }
+        )
+
+        Spacer(modifier = Modifier.height(6.dp))
 
         if (voiceRecordings.isEmpty() && isRefreshing) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -160,78 +177,102 @@ fun RecordingsListScreen(
                         StickyTableHeader(columns = columns)
                     }
 
-                    itemsIndexed(voiceRecordings, key = { _, rec -> rec.filePath }) { index, rec ->
-                        val isDefinitelySynced = rec.syncedAt > 0L || rec.isSynced
-                        val effectiveSyncedAt = when {
-                            rec.syncedAt > 0L -> rec.syncedAt
-                            isDefinitelySynced -> verifiedTimeMs
-                            else -> 0L
-                        }
+                    timeGroups.forEach { group ->
+                        val isExpanded = !collapsedKeys.contains(group.key)
 
-                        val tagPrefix = when {
-                            rec.contactName == "Watch Voice Memo" || rec.parentFolderName.contains("Watch", ignoreCase = true) -> "[워치] "
-                            else -> "[음성] "
-                        }
-
-                        val rowBg = if (index % 2 == 0) {
-                            MaterialTheme.colorScheme.surface
-                        } else {
-                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
-                        }
-
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(rowBg)
-                                .padding(horizontal = 8.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = if (rec.fileName.isNotBlank()) "$tagPrefix${rec.fileName}" else "-",
-                                modifier = Modifier
-                                    .weight(columns[0].weight)
-                                    .padding(horizontal = 2.dp),
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Medium,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-
-                            Text(
-                                text = formatTableDateTime(rec.recordedAt),
-                                modifier = Modifier
-                                    .weight(columns[1].weight)
-                                    .padding(horizontal = 2.dp),
-                                fontSize = 11.sp,
-                                textAlign = TextAlign.Center,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-
-                            Text(
-                                text = if (rec.fileSize > 0L) KakaoChatFolderWatcher.formatFileSize(rec.fileSize) else "-",
-                                modifier = Modifier
-                                    .weight(columns[2].weight)
-                                    .padding(horizontal = 2.dp),
-                                fontSize = 11.sp,
-                                textAlign = TextAlign.Center,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-
-                            Text(
-                                text = formatTableDateTime(effectiveSyncedAt),
-                                modifier = Modifier
-                                    .weight(columns[3].weight)
-                                    .padding(horizontal = 2.dp),
-                                fontSize = 11.sp,
-                                fontWeight = if (effectiveSyncedAt > 0L) FontWeight.SemiBold else FontWeight.Normal,
-                                textAlign = TextAlign.Center,
-                                color = if (effectiveSyncedAt > 0L) Color(0xFF2E7D32) else MaterialTheme.colorScheme.outline
+                        item(key = "split_${group.key}") {
+                            TimeSplitSectionHeader(
+                                title = group.title,
+                                count = group.items.size,
+                                isExpanded = isExpanded,
+                                onToggle = {
+                                    collapsedKeys = if (isExpanded) {
+                                        collapsedKeys + group.key
+                                    } else {
+                                        collapsedKeys - group.key
+                                    }
+                                }
                             )
                         }
-                        HorizontalDivider(
-                            thickness = 0.5.dp,
-                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
-                        )
+
+                        if (isExpanded) {
+                            itemsIndexed(
+                                items = group.items,
+                                key = { _, rec -> "${group.key}_${rec.filePath}" }
+                            ) { index, rec ->
+                                val isDefinitelySynced = rec.syncedAt > 0L || rec.isSynced
+                                val effectiveSyncedAt = when {
+                                    rec.syncedAt > 0L -> rec.syncedAt
+                                    isDefinitelySynced -> verifiedTimeMs
+                                    else -> 0L
+                                }
+
+                                val tagPrefix = when {
+                                    rec.contactName == "Watch Voice Memo" || rec.parentFolderName.contains("Watch", ignoreCase = true) -> "[워치] "
+                                    else -> "[음성] "
+                                }
+
+                                val rowBg = if (index % 2 == 0) {
+                                    MaterialTheme.colorScheme.surface
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                                }
+
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(rowBg)
+                                        .padding(horizontal = 8.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = if (rec.fileName.isNotBlank()) "$tagPrefix${rec.fileName}" else "-",
+                                        modifier = Modifier
+                                            .weight(columns[0].weight)
+                                            .padding(horizontal = 2.dp),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+
+                                    Text(
+                                        text = formatTableDateTime(rec.recordedAt),
+                                        modifier = Modifier
+                                            .weight(columns[1].weight)
+                                            .padding(horizontal = 2.dp),
+                                        fontSize = 11.sp,
+                                        textAlign = TextAlign.Center,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+
+                                    Text(
+                                        text = if (rec.fileSize > 0L) KakaoChatFolderWatcher.formatFileSize(rec.fileSize) else "-",
+                                        modifier = Modifier
+                                            .weight(columns[2].weight)
+                                            .padding(horizontal = 2.dp),
+                                        fontSize = 11.sp,
+                                        textAlign = TextAlign.Center,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+
+                                    Text(
+                                        text = formatTableDateTime(effectiveSyncedAt),
+                                        modifier = Modifier
+                                            .weight(columns[3].weight)
+                                            .padding(horizontal = 2.dp),
+                                        fontSize = 11.sp,
+                                        fontWeight = if (effectiveSyncedAt > 0L) FontWeight.SemiBold else FontWeight.Normal,
+                                        textAlign = TextAlign.Center,
+                                        color = if (effectiveSyncedAt > 0L) Color(0xFF2E7D32) else MaterialTheme.colorScheme.outline
+                                    )
+                                }
+                                HorizontalDivider(
+                                    thickness = 0.5.dp,
+                                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                                )
+                            }
+                        }
                     }
                 }
             }

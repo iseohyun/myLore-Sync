@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.lifecycleScope
 import com.iseohyun.mylore.sync.collector.CallRecordingCollector
@@ -36,9 +37,17 @@ class MainActivity : ComponentActivity() {
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { _ ->
+        com.iseohyun.mylore.sync.collector.LocationWifiCollector.ensurePassiveListenerRegistered(applicationContext)
         lifecycleScope.launch(Dispatchers.IO) {
             CallRecordingCollector.initializeActiveDirectories(appPreferences)
             com.iseohyun.mylore.sync.collector.PhotoMediaCollector.initializeActiveDirectories(appPreferences)
+            val db = com.iseohyun.mylore.sync.data.local.AppDatabase.getInstance(applicationContext)
+            com.iseohyun.mylore.sync.collector.GpsBackgroundProcessor.startHealthGpsSync(
+                db = db,
+                prefs = appPreferences,
+                force = false,
+                context = applicationContext
+            )
             if (appPreferences.isPaired.first()) {
                 com.iseohyun.mylore.sync.engine.RealtimeSyncForegroundService.startService(applicationContext)
             }
@@ -50,11 +59,19 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         appPreferences = AppPreferences(applicationContext)
+        com.iseohyun.mylore.sync.collector.LocationWifiCollector.ensurePassiveListenerRegistered(applicationContext)
 
-        // 앱 초기 실행 시 후보 녹음/사진 폴더 리스트 중 실제 존재하는 폴더를 확인하여 기본 조회 폴더로 지정
+        // 앱 초기 실행 시 후보 녹음/사진 폴더 리스트 중 실제 존재하는 폴더를 확인하여 기본 조회 폴더로 지정 및 GPS 데이터 수집
         lifecycleScope.launch(Dispatchers.IO) {
             CallRecordingCollector.initializeActiveDirectories(appPreferences)
             com.iseohyun.mylore.sync.collector.PhotoMediaCollector.initializeActiveDirectories(appPreferences)
+            val db = com.iseohyun.mylore.sync.data.local.AppDatabase.getInstance(applicationContext)
+            com.iseohyun.mylore.sync.collector.GpsBackgroundProcessor.startHealthGpsSync(
+                db = db,
+                prefs = appPreferences,
+                force = false,
+                context = applicationContext
+            )
             if (appPreferences.isPaired.first()) {
                 com.iseohyun.mylore.sync.engine.RealtimeSyncForegroundService.startService(applicationContext)
             }
@@ -70,7 +87,7 @@ class MainActivity : ComponentActivity() {
                     color = MaterialTheme.colorScheme.background
                 ) {
                     val isPaired by appPreferences.isPaired.collectAsState(initial = false)
-                    var currentScreen by remember { mutableStateOf("main") }
+                    var currentScreen by rememberSaveable { mutableStateOf("main") }
 
                     if (!isPaired) {
                         OnboardingScreen(

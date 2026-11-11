@@ -134,4 +134,21 @@ interface MyLoreApiService {
         @Header("X-MyLore-Token") token: String,
         @Body body: RequestBody
     ): Response<SyncResponse>
+
+    @POST("/api/v1/sync/location-logs")
+    suspend fun syncLocationLogs(
+        @Header("X-MyLore-Token") token: String,
+        @Body request: SyncLocationLogsRequest
+    ): Response<SyncResponse>
+
+    @GET("/api/v1/voiceprint/enroll")
+    suspend fun getVoiceprintSession(
+        @Header("X-MyLore-Token") token: String
+    ): Response<VoiceprintSessionResponse>
+
+    @POST("/api/v1/voiceprint/enroll")
+    suspend fun enrollMobileVoiceprint(
+        @Header("X-MyLore-Token") token: String,
+        @Body request: VoiceprintEnrollRequest
+    ): Response<VoiceprintEnrollResponse>
 }
