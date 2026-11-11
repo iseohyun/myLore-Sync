@@ -36,6 +36,13 @@ fun BusinessCardWalletScreen(
 
     val dateFormat = remember { SimpleDateFormat("yyyy-MM-dd", Locale.KOREA) }
 
+    val timeGroups = remember(cardList) {
+        groupItemsByTimeSplit(cardList) { card ->
+            if (card.updatedAt > 0L) card.updatedAt else card.createdAt
+        }
+    }
+    var collapsedKeys by remember { mutableStateOf(setOf<String>()) }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -87,7 +94,7 @@ fun BusinessCardWalletScreen(
             }
         )
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
         Text(
             "보관 중인 명함: ${cardList.size}건",
@@ -96,7 +103,19 @@ fun BusinessCardWalletScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(6.dp))
+
+        TimeSplitTabControlBar(
+            groups = timeGroups,
+            collapsedKeys = collapsedKeys,
+            onToggleGroup = { key ->
+                collapsedKeys = if (collapsedKeys.contains(key)) collapsedKeys - key else collapsedKeys + key
+            },
+            onExpandAll = { collapsedKeys = emptySet() },
+            onCollapseAll = { collapsedKeys = timeGroups.map { it.key }.toSet() }
+        )
+
+        Spacer(modifier = Modifier.height(6.dp))
 
         if (cardList.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -121,8 +140,32 @@ fun BusinessCardWalletScreen(
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                items(cardList) { card ->
-                    BusinessCardItemCard(card = card, dateFormat = dateFormat)
+                timeGroups.forEach { group ->
+                    val isExpanded = !collapsedKeys.contains(group.key)
+
+                    item(key = "split_${group.key}") {
+                        TimeSplitSectionHeader(
+                            title = group.title,
+                            count = group.items.size,
+                            isExpanded = isExpanded,
+                            onToggle = {
+                                collapsedKeys = if (isExpanded) {
+                                    collapsedKeys + group.key
+                                } else {
+                                    collapsedKeys - group.key
+                                }
+                            }
+                        )
+                    }
+
+                    if (isExpanded) {
+                        items(
+                            items = group.items,
+                            key = { "${group.key}_${it.id}" }
+                        ) { card ->
+                            BusinessCardItemCard(card = card, dateFormat = dateFormat)
+                        }
+                    }
                 }
             }
         }

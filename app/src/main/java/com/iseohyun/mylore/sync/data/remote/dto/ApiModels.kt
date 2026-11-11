@@ -290,3 +290,54 @@ data class SyncAckResponse(
     @SerializedName("acked_domain_count") val ackedDomainCount: Int = 0
 )
 
+
+data class SyncLocationLogItem(
+    @SerializedName("recorded_at") val recordedAt: String = "",
+    @SerializedName("event_type") val eventType: String = "movement",
+    @SerializedName("wifi_ssid") val wifiSsid: String = "",
+    @SerializedName("wifi_bssid") val wifiBssid: String = "",
+    @SerializedName("place_label") val placeLabel: String = "",
+    @SerializedName("latitude") val latitude: Double? = null,
+    @SerializedName("longitude") val longitude: Double? = null,
+    @SerializedName("accuracy_m") val accuracyM: Double? = null,
+    @SerializedName("battery_pct") val batteryPct: Int? = null,
+    @SerializedName("ts") val ts: Long = 0L,
+    @SerializedName("note") val note: String = ""
+)
+
+data class SyncLocationLogsRequest(
+    @SerializedName("logs") val logs: List<SyncLocationLogItem>
+)
+
+
+data class VoiceprintSessionResponse(
+    @SerializedName("ok") val ok: Boolean = false,
+    @SerializedName("phraseIdx") val phraseIdx: Int = 0,
+    @SerializedName("totalPhrases") val totalPhrases: Int = 5,
+    @SerializedName("phraseTitle") val phraseTitle: String = "",
+    @SerializedName("phraseText") val phraseText: String = "",
+    @SerializedName("sampleCount") val sampleCount: Int = 0,
+    @SerializedName("crossAgreementScore") val crossAgreementScore: Double = 0.0,
+    @SerializedName("consistencyA") val consistencyA: Double = 0.0,
+    @SerializedName("consistencyB") val consistencyB: Double = 0.0,
+    @SerializedName("error") val error: String? = null
+)
+
+data class VoiceprintEnrollRequest(
+    @SerializedName("audioBase64") val audioBase64: String,
+    @SerializedName("phraseText") val phraseText: String = "",
+    @SerializedName("fileExt") val fileExt: String = "m4a"
+)
+
+data class VoiceprintEnrollResponse(
+    @SerializedName("ok") val ok: Boolean = false,
+    @SerializedName("sampleCount") val sampleCount: Int = 0,
+    @SerializedName("crossAgreementScore") val crossAgreementScore: Double = 0.0,
+    @SerializedName("consistencyA") val consistencyA: Double = 0.0,
+    @SerializedName("consistencyB") val consistencyB: Double = 0.0,
+    @SerializedName("nextPhraseIdx") val nextPhraseIdx: Int = 0,
+    @SerializedName("totalPhrases") val totalPhrases: Int = 5,
+    @SerializedName("nextPhraseTitle") val nextPhraseTitle: String = "",
+    @SerializedName("nextPhraseText") val nextPhraseText: String = "",
+    @SerializedName("error") val error: String? = null
+)

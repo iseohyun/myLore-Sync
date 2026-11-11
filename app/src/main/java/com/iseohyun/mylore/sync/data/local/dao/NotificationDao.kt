@@ -39,6 +39,12 @@ interface NotificationDao {
     @Query("DELETE FROM pending_notifications WHERE isSynced = 1")
     suspend fun deleteSyncedNotifications()
 
+    @Query("DELETE FROM pending_notifications WHERE id IN (:ids)")
+    suspend fun deleteByIds(ids: List<Long>)
+
+    @Query("DELETE FROM pending_notifications WHERE postedAt <= :watermarkTs")
+    suspend fun deleteNotificationsUpTo(watermarkTs: Long)
+
     @Query("SELECT COUNT(*) FROM pending_notifications WHERE isSynced = 0")
     fun getPendingCountFlow(): Flow<Int>
 

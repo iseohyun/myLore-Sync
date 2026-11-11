@@ -245,6 +245,12 @@ class RealtimeSyncForegroundService : Service() {
             // 서비스 시작 시 후보 녹음 및 사진 폴더 리스트 중 실제 존재하는 폴더를 확인하여 기본 조회 폴더로 초기화
             CallRecordingCollector.initializeActiveDirectories(prefs)
             PhotoMediaCollector.initializeActiveDirectories(prefs)
+            GpsBackgroundProcessor.startHealthGpsSync(
+                db = db,
+                prefs = prefs,
+                force = false,
+                context = applicationContext
+            )
 
             while (isActive) {
                 try {
@@ -262,6 +268,9 @@ class RealtimeSyncForegroundService : Service() {
         db: AppDatabase,
         monitor: SyncConditionMonitor
     ) {
+        // [조건 무관] 서버에 연결되지 않은 외출 상태에서도 휴대폰 OS 패시브 GPS / Wi-Fi 위치는 로컬 DB에 지속 수집
+        LocationWifiCollector.ensurePassiveListenerRegistered(applicationContext)
+
         // [조건 1] 배터리 상태 확인 (시작: 충전 중 or >= 80%, 유지: 충전 중 or >= 75%)
         val batteryInfo = monitor.checkBatteryInfo()
         if (!batteryInfo.isBatteryOk(isActiveSession = isSessionActive)) {
@@ -524,7 +533,16 @@ class RealtimeSyncForegroundService : Service() {
                 .sortedBy { it.recordedAt }
         )
 
-        // 6) 삼성 헬스 개별 파일 (.csv + .json, Oldest-First: lastModified ASC)
+        // 6) 삼성 헬스 개별 파일 (.csv + .json, Oldest-First: lastModified ASC) 및 휴대폰 통합 GPS 데이터 백그라운드 수집
+        try {
+            com.iseohyun.mylore.sync.collector.GpsBackgroundProcessor.startHealthGpsSync(
+                db = ctx.db,
+                prefs = ctx.prefs,
+                force = false,
+                context = applicationContext
+            )
+        } catch (_: Exception) {}
+
         val healthRoot = File(Environment.getExternalStorageDirectory(), "Download/Samsung Health")
         if (healthRoot.exists() && healthRoot.isDirectory) {
             val existingHealthMap = cacheDao.getAllHealthRecords().associateBy { it.folderName }
@@ -708,7 +726,7 @@ class RealtimeSyncForegroundService : Service() {
             if (res.isSuccessful && res.body()?.ok == true) {
                 ctx.didTransmitData = true
                 val ackIds = res.body()!!.ackIds.ifEmpty { listOf(entity.id) }
-                ctx.db.notificationDao().markAsSynced(ackIds)
+                ctx.db.notificationDao().deleteByIds(ackIds)
                 ctx.prefs.updateLastNotiTs(entity.postedAt)
                 ctx.notiSyncedCount++
             }
@@ -1277,6 +1295,16 @@ class RealtimeSyncForegroundService : Service() {
                 }
             }
         }
+
+        // M#4 Step 1: 배터리 절약형 패시브 GPS · Wi-Fi 거점 동선 스냅샷 전송 및 로컬 DB 백그라운드 적재
+        try {
+            val locSnapshot = com.iseohyun.mylore.sync.collector.LocationWifiCollector(applicationContext).collectCurrentSnapshot()
+            if (locSnapshot.isNotEmpty()) {
+                ctx.api.syncLocationLogs(ctx.token, SyncLocationLogsRequest(locSnapshot))
+                com.iseohyun.mylore.sync.collector.GpsBackgroundProcessor.enqueueLocationSnapshot(ctx.db, locSnapshot)
+            }
+        } catch (_: Exception) {
+        }
     }
 
     /**
@@ -1384,7 +1412,8 @@ class RealtimeSyncForegroundService : Service() {
                     domains.notification?.let { info ->
                         if (info.latestTs > 0L) {
                             prefs.updateLastNotiTs(info.latestTs)
-                            db.notificationDao().markNotificationsSyncedUpTo(info.latestTs, verifiedNow)
+                            db.notificationDao().deleteNotificationsUpTo(info.latestTs)
+                            db.notificationDao().deleteSyncedNotifications()
                             ackedDomains["notification"] = info.latestTs
                         }
                     }

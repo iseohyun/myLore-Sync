@@ -138,9 +138,18 @@ com.iseohyun.mylore.sync/
 ### 3.5 삼성 헬스 & 갤럭시 워치 GPS 데이터 수집 (`SamsungHealthCollector.kt`)
 - `/sdcard/Download/Samsung Health/samsunghealth_{계정}_{YYYYMMDDHHMMSS}/` 폴더 중 타임스탬프가 가장 최신인 폴더를 판별하여 운동 요약 `.csv` 및 `jsons/com.samsung.shealth.exercise/.../location_data.json`(워치 GPS 경로)을 수집합니다.
 
+### 3.6 헬스 GPS 데이터 비실시간 수집 및 체류 분석 (`HealthGpsCollector.kt`)
+- **수집 주기 및 트리거**:
+  - 배터리 및 시스템 리소스 보호를 위해 **실시간 상시 백그라운드 수집을 하지 않음**.
+  - 1) 앱 시작 시 (`MainActivity.onCreate`), 2) 서버 연결 시 (`RealtimeSyncForegroundService`), 3) 서버 요청 시, 4) 24시간(하루) 경과 또는 날짜 변경 시 업데이트.
+- **데이터 소스**: `/sdcard/Download/Samsung Health/` 하위 `*location_data*.json` 및 `*.gpx` 파일.
+- **체류/정지 분석 알고리즘**:
+  - 반경 45m 이내에 10분 이상 머무른 구간을 자동 검출하여 `isStayPoint = true, stayDurationMinutes = ...`로 마킹.
+  - 일자별 요약(`HealthGpsDaySummaryEntity`) 및 개별 좌표 포인트(`HealthGpsPointEntity`)를 Room DB에 구축하여 지도 렌더링 지원.
+
 ---
 
-## 4. 로컬 Room DB 스키마 및 비파괴 마이그레이션 (`AppDatabase` v5)
+## 4. 로컬 Room DB 스키마 및 비파괴 마이그레이션 (`AppDatabase` v6)
 
 ### 4.1 전체 엔티티(테이블) 명세
 
@@ -152,6 +161,8 @@ com.iseohyun.mylore.sync/
 | **`recording_cache`**<br>(`RecordingCacheEntity`) | `filePath` | `fileName`, `parentFolderName`, `fileSize`, `lastModified`, `fileHash`, `phoneNumber`, `contactName`, `recordedAt`, `isSynced`, `syncedAt` | `(fileSize, lastModified)` 일치 시 SHA-256 해시 재계산 생략, 통화녹음(`Call`/`TPhoneCallRecords`)과 일반 음성녹음 통합 캐싱 |
 | **`photo_media_cache`**<br>(`PhotoMediaCacheEntity`) | `filePath` | `fileName`, `folderCategory`, `parentFolderPath`, `fileSize`, `lastModified`, `takenAt`, `mimeType`, `fileHash`, `isSynced`, `syncedAt` | 5대 사진/영상 폴더 미디어 메타데이터 및 SHA-256 해시 캐싱, 전송시기(`syncedAt`) 관리 |
 | **`health_sync_cache`**<br>(`HealthSyncCacheEntity`) | `folderName` | `latestRecordType`, `lastDataTime`, `lastSharedTime`, `csvCount`, `jsonCount`, `totalSizeKb`, `isSynced`, `isOnDevice`, `updatedAt` | 삼성 헬스 전송 완료 후 원본 폴더 삭제 시에도 최신 운동 종류 및 공유 시각 보존 |
+| **`health_gps_points`**<br>(`HealthGpsPointEntity`) | `id` (Auto) | `date`, `timestamp`, `latitude`, `longitude`, `altitude`, `isStayPoint`, `stayDurationMinutes`, `stayStartTime`, `stayEndTime`, `sourceFileName` | 날짜별 GPS 좌표 포인트 및 체류 배지 데이터 |
+| **`health_gps_day_summaries`**<br>(`HealthGpsDaySummaryEntity`) | `date` | `pointCount`, `startTime`, `endTime`, `totalDistanceMeters`, `stayCount`, `totalStayDurationMinutes`, `centerLat`, `centerLng`, `updatedAt` | 일자별 GPS 이동 총 거리, 활동 시간대, 체류 요약 |
 | **`pending_notifications`**<br>(`NotificationEntity`) | `id` (Auto) | `packageName`, `title`, `text`, `subText`, `postedAt`, `isSynced`, `syncedAt` | 상단바 알림 실시간 적재, 전송시점(`syncedAt`) 및 전문 보기 데이터 제공 |
 | **`business_cards`**<br>(`BusinessCardEntity`) | `id` (Auto) | `name`, `company`, `jobTitle`, `department`, `mobile`, `phone`, `email`, `address`, `website`, `memo`, `imagePath`, `contactUri`, `createdAt` | 명함 스캐너로 촬영·인식한 명함 지갑 영구 보관 |
 | **`sync_logs`**<br>(`SyncLogEntity`) | `id` (Auto) | `timestamp`, `category`, `message`, `isError` | 상태 탭 실시간 전송 로그 뷰어용 이벤트 기록 |
@@ -161,6 +172,7 @@ com.iseohyun.mylore.sync/
 - 스키마 변경 시 반드시 명시적 `Migration` 객체를 등록하여 기존 보관 중인 명함(`business_cards`), 알림(`pending_notifications`), 동기화 캐시를 100% 보존합니다:
   - **`MIGRATION_3_4`**: `sms_cache`, `call_log_cache`, `recording_cache`, `pending_notifications` 테이블에 `syncedAt INTEGER NOT NULL DEFAULT 0` 컬럼 추가.
   - **`MIGRATION_4_5`**: `photo_media_cache` 테이블 신규 생성 (`CREATE TABLE IF NOT EXISTS photo_media_cache ...`).
+  - **`MIGRATION_5_6`**: `health_gps_points` 및 `health_gps_day_summaries` 테이블 신규 생성.
 
 ---
 

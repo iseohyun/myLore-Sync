@@ -8,11 +8,14 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -45,16 +48,18 @@ fun DashboardScreen(
 ) {
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
-    var currentItem by remember { mutableStateOf(DrawerItem.STATUS) }
+    var currentItem by rememberSaveable { mutableStateOf(DrawerItem.STATUS) }
 
     ModalNavigationDrawer(
         drawerState = drawerState,
+        gesturesEnabled = currentItem != DrawerItem.GPS,
         drawerContent = {
             ModalDrawerSheet(modifier = Modifier.width(280.dp)) {
                 Column(
                     modifier = Modifier
                         .fillMaxHeight()
                         .statusBarsPadding()
+                        .verticalScroll(rememberScrollState())
                         .padding(horizontal = 16.dp, vertical = 12.dp)
                 ) {
                     Text(
@@ -81,7 +86,8 @@ fun DashboardScreen(
                         DrawerItem.NOTIFICATION,
                         DrawerItem.RECORDINGS,
                         DrawerItem.PHOTO,
-                        DrawerItem.HEALTH
+                        DrawerItem.HEALTH,
+                        DrawerItem.GPS
                     ).forEach { item ->
                         NavigationDrawerItem(
                             label = { Text("${item.icon}  ${item.title}", fontSize = 15.sp, fontWeight = FontWeight.Medium) },
@@ -114,6 +120,8 @@ fun DashboardScreen(
                             modifier = Modifier.padding(vertical = 2.dp)
                         )
                     }
+
+                    Spacer(modifier = Modifier.height(24.dp))
                 }
             }
         }
@@ -164,6 +172,12 @@ fun DashboardScreen(
             }
             DrawerItem.HEALTH -> {
                 HealthSyncScreen(
+                    onOpenDrawer = { scope.launch { drawerState.open() } }
+                )
+            }
+            DrawerItem.GPS -> {
+                HealthGpsScreen(
+                    appPreferences = appPreferences,
                     onOpenDrawer = { scope.launch { drawerState.open() } }
                 )
             }

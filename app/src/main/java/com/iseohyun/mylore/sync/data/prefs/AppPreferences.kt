@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.*
 import androidx.datastore.preferences.preferencesDataStore
+import com.iseohyun.mylore.sync.BuildConfig
 import com.iseohyun.mylore.sync.data.remote.dto.StatusResponse
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -36,6 +37,8 @@ class AppPreferences(private val context: Context) {
         private val KEY_LAST_RECORDING_TS = longPreferencesKey("last_recording_ts")
         private val KEY_LAST_HEALTH_TS = longPreferencesKey("last_health_ts")
         private val KEY_LAST_PHOTO_TS = longPreferencesKey("last_photo_ts")
+        private val KEY_LAST_GPS_COLLECT_TS = longPreferencesKey("last_gps_collect_ts")
+        private val KEY_GOOGLE_MAPS_API_KEY = stringPreferencesKey("google_maps_api_key")
         private val KEY_LAST_CONTACT_TS = longPreferencesKey("last_contact_ts")
         private val KEY_LAST_USAGE_TS = longPreferencesKey("last_usage_ts")
 
@@ -103,6 +106,26 @@ class AppPreferences(private val context: Context) {
 
     val lastPhotoTs: Flow<Long> = context.dataStore.data.map { prefs ->
         prefs[KEY_LAST_PHOTO_TS] ?: 0L
+    }
+
+    val lastGpsCollectTs: Flow<Long> = context.dataStore.data.map { prefs ->
+        prefs[KEY_LAST_GPS_COLLECT_TS] ?: 0L
+    }
+
+    suspend fun updateLastGpsCollectTs(ts: Long) {
+        context.dataStore.edit { prefs ->
+            prefs[KEY_LAST_GPS_COLLECT_TS] = ts
+        }
+    }
+
+    val googleMapsApiKey: Flow<String> = context.dataStore.data.map { prefs ->
+        prefs[KEY_GOOGLE_MAPS_API_KEY] ?: BuildConfig.MAPS_API_KEY
+    }
+
+    suspend fun updateGoogleMapsApiKey(key: String) {
+        context.dataStore.edit { prefs ->
+            prefs[KEY_GOOGLE_MAPS_API_KEY] = key.trim()
+        }
     }
 
     val lastContactTs: Flow<Long> = context.dataStore.data.map { prefs ->

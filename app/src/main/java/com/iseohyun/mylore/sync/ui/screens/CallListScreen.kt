@@ -99,6 +99,11 @@ fun CallListScreen(
 
     val syncedRowCount = remember(tableRows) { tableRows.count { it.completedSyncTs > 0L } }
 
+    val timeGroups = remember(tableRows) {
+        groupItemsByTimeSplit(tableRows) { it.eventTs }
+    }
+    var collapsedKeys by remember { mutableStateOf(setOf<String>()) }
+
     val columns = remember {
         listOf(
             TableColumnSpec("송수신", 0.11f, TextAlign.Center),
@@ -168,7 +173,19 @@ fun CallListScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(6.dp))
+
+        TimeSplitTabControlBar(
+            groups = timeGroups,
+            collapsedKeys = collapsedKeys,
+            onToggleGroup = { key ->
+                collapsedKeys = if (collapsedKeys.contains(key)) collapsedKeys - key else collapsedKeys + key
+            },
+            onExpandAll = { collapsedKeys = emptySet() },
+            onCollapseAll = { collapsedKeys = timeGroups.map { it.key }.toSet() }
+        )
+
+        Spacer(modifier = Modifier.height(6.dp))
 
         if (tableRows.isEmpty() && isRefreshing) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -189,95 +206,119 @@ fun CallListScreen(
                         StickyTableHeader(columns = columns)
                     }
 
-                    itemsIndexed(tableRows, key = { _, row -> row.key }) { index, row ->
-                        val rowBg = if (index % 2 == 0) {
-                            MaterialTheme.colorScheme.surface
-                        } else {
-                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
-                        }
+                    timeGroups.forEach { group ->
+                        val isExpanded = !collapsedKeys.contains(group.key)
 
-                        val dirColor = when (row.directionLabel) {
-                            "송신" -> MaterialTheme.colorScheme.primary
-                            "수신" -> MaterialTheme.colorScheme.secondary
-                            "거부" -> MaterialTheme.colorScheme.error
-                            else -> MaterialTheme.colorScheme.outline
-                        }
-
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(rowBg)
-                                .padding(horizontal = 6.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = row.directionLabel,
-                                modifier = Modifier
-                                    .weight(columns[0].weight)
-                                    .padding(horizontal = 1.dp),
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                textAlign = TextAlign.Center,
-                                color = dirColor
-                            )
-
-                            Text(
-                                text = row.targetLabel,
-                                modifier = Modifier
-                                    .weight(columns[1].weight)
-                                    .padding(horizontal = 2.dp),
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Medium,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-
-                            Text(
-                                text = formatTableDateTime(row.eventTs),
-                                modifier = Modifier
-                                    .weight(columns[2].weight)
-                                    .padding(horizontal = 1.dp),
-                                fontSize = 10.sp,
-                                textAlign = TextAlign.Center,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-
-                            Text(
-                                text = row.durationText,
-                                modifier = Modifier
-                                    .weight(columns[3].weight)
-                                    .padding(horizontal = 1.dp),
-                                fontSize = 10.sp,
-                                textAlign = TextAlign.Center,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-
-                            Text(
-                                text = row.voiceText,
-                                modifier = Modifier
-                                    .weight(columns[4].weight)
-                                    .padding(horizontal = 1.dp),
-                                fontSize = 11.sp,
-                                fontWeight = if (row.voiceText != "-") FontWeight.Bold else FontWeight.Normal,
-                                textAlign = TextAlign.Center,
-                                color = if (row.voiceText != "-") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
-                            )
-
-                            Text(
-                                text = formatTableDateTime(row.completedSyncTs),
-                                modifier = Modifier
-                                    .weight(columns[5].weight)
-                                    .padding(horizontal = 1.dp),
-                                fontSize = 10.sp,
-                                fontWeight = if (row.completedSyncTs > 0L) FontWeight.SemiBold else FontWeight.Normal,
-                                textAlign = TextAlign.Center,
-                                color = if (row.completedSyncTs > 0L) Color(0xFF2E7D32) else MaterialTheme.colorScheme.outline
+                        item(key = "split_${group.key}") {
+                            TimeSplitSectionHeader(
+                                title = group.title,
+                                count = group.items.size,
+                                isExpanded = isExpanded,
+                                onToggle = {
+                                    collapsedKeys = if (isExpanded) {
+                                        collapsedKeys + group.key
+                                    } else {
+                                        collapsedKeys - group.key
+                                    }
+                                }
                             )
                         }
-                        HorizontalDivider(
-                            thickness = 0.5.dp,
-                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
-                        )
+
+                        if (isExpanded) {
+                            itemsIndexed(
+                                items = group.items,
+                                key = { _, row -> "${group.key}_${row.key}" }
+                            ) { index, row ->
+                                val rowBg = if (index % 2 == 0) {
+                                    MaterialTheme.colorScheme.surface
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                                }
+
+                                val dirColor = when (row.directionLabel) {
+                                    "송신" -> MaterialTheme.colorScheme.primary
+                                    "수신" -> MaterialTheme.colorScheme.secondary
+                                    "거부" -> MaterialTheme.colorScheme.error
+                                    else -> MaterialTheme.colorScheme.outline
+                                }
+
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(rowBg)
+                                        .padding(horizontal = 6.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = row.directionLabel,
+                                        modifier = Modifier
+                                            .weight(columns[0].weight)
+                                            .padding(horizontal = 1.dp),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        textAlign = TextAlign.Center,
+                                        color = dirColor
+                                    )
+
+                                    Text(
+                                        text = row.targetLabel,
+                                        modifier = Modifier
+                                            .weight(columns[1].weight)
+                                            .padding(horizontal = 2.dp),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+
+                                    Text(
+                                        text = formatTableDateTime(row.eventTs),
+                                        modifier = Modifier
+                                            .weight(columns[2].weight)
+                                            .padding(horizontal = 1.dp),
+                                        fontSize = 10.sp,
+                                        textAlign = TextAlign.Center,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+
+                                    Text(
+                                        text = row.durationText,
+                                        modifier = Modifier
+                                            .weight(columns[3].weight)
+                                            .padding(horizontal = 1.dp),
+                                        fontSize = 10.sp,
+                                        textAlign = TextAlign.Center,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+
+                                    Text(
+                                        text = row.voiceText,
+                                        modifier = Modifier
+                                            .weight(columns[4].weight)
+                                            .padding(horizontal = 1.dp),
+                                        fontSize = 11.sp,
+                                        fontWeight = if (row.voiceText != "-") FontWeight.Bold else FontWeight.Normal,
+                                        textAlign = TextAlign.Center,
+                                        color = if (row.voiceText != "-") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
+                                    )
+
+                                    Text(
+                                        text = formatTableDateTime(row.completedSyncTs),
+                                        modifier = Modifier
+                                            .weight(columns[5].weight)
+                                            .padding(horizontal = 1.dp),
+                                        fontSize = 10.sp,
+                                        fontWeight = if (row.completedSyncTs > 0L) FontWeight.SemiBold else FontWeight.Normal,
+                                        textAlign = TextAlign.Center,
+                                        color = if (row.completedSyncTs > 0L) Color(0xFF2E7D32) else MaterialTheme.colorScheme.outline
+                                    )
+                                }
+                                HorizontalDivider(
+                                    thickness = 0.5.dp,
+                                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -324,8 +365,6 @@ private fun buildUnifiedCallTableRows(
 
         val durationStr = if (call.durationSec > 0L) {
             formatDurationHhMmSs(call.durationSec)
-        } else if (call.callType == "rejected" || call.callType == "missed") {
-            "00:00:00"
         } else {
             "00:00:00"
         }
@@ -337,7 +376,6 @@ private fun buildUnifiedCallTableRows(
             else -> 0L
         }
 
-        // 프로토콜 규칙: 통화기록과 통화녹음을 하나의 이벤트로 간주하여, 녹음이 있으면 둘 다 완료되어야 완료로 판정
         val completedSyncTs = if (matchedRec != null) {
             val isRecSynced = matchedRec.syncedAt > 0L || matchedRec.isSynced
             val effectiveRecSyncTs = when {
@@ -367,7 +405,6 @@ private fun buildUnifiedCallTableRows(
         )
     }
 
-    // CallLog에 매칭되지 않은 단독 T전화녹음(TPhoneCallRecords) 및 통화녹음도 통화 표에 통합
     for (rec in callRecordings) {
         if (matchedRecPaths.contains(rec.filePath)) continue
 

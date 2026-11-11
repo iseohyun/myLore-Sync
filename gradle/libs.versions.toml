@@ -21,6 +21,8 @@ navigationCompose = "2.10.2"
 mlkitDocumentScanner = "16.0.0"
 mlkitTextKorean = "16.0.1"
 coilCompose = "2.7.0"
+playServicesMaps = "19.2.0"
+mapsCompose = "6.5.2"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -70,6 +72,10 @@ mlkit-text-korean = { group = "com.google.mlkit", name = "text-recognition-korea
 
 # Coil for Compose
 coil-compose = { group = "io.coil-kt", name = "coil-compose", version.ref = "coilCompose" }
+
+# Google Maps SDK for Android
+play-services-maps = { group = "com.google.android.gms", name = "play-services-maps", version.ref = "playServicesMaps" }
+maps-compose = { group = "com.google.maps.android", name = "maps-compose", version.ref = "mapsCompose" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

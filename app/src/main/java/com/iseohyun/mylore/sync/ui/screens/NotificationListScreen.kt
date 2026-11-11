@@ -59,6 +59,11 @@ fun NotificationListScreen(
         notifications.count { it.syncedAt <= 0L && !it.isSynced && (lastNotiTs <= 0L || it.postedAt > lastNotiTs) }
     }
 
+    val timeGroups = remember(notifications) {
+        groupItemsByTimeSplit(notifications) { it.postedAt }
+    }
+    var collapsedKeys by remember { mutableStateOf(setOf<String>()) }
+
     val columns = remember {
         listOf(
             TableColumnSpec("이벤트명", 0.30f, TextAlign.Start),
@@ -110,7 +115,19 @@ fun NotificationListScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(6.dp))
+
+        TimeSplitTabControlBar(
+            groups = timeGroups,
+            collapsedKeys = collapsedKeys,
+            onToggleGroup = { key ->
+                collapsedKeys = if (collapsedKeys.contains(key)) collapsedKeys - key else collapsedKeys + key
+            },
+            onExpandAll = { collapsedKeys = emptySet() },
+            onCollapseAll = { collapsedKeys = timeGroups.map { it.key }.toSet() }
+        )
+
+        Spacer(modifier = Modifier.height(6.dp))
 
         if (notifications.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -127,87 +144,111 @@ fun NotificationListScreen(
                         StickyTableHeader(columns = columns)
                     }
 
-                    itemsIndexed(notifications, key = { _, item -> item.id }) { index, item ->
-                        val isDefinitelySynced =
-                            item.syncedAt > 0L || item.isSynced || (lastNotiTs > 0L && item.postedAt <= lastNotiTs)
-                        val effectiveSyncedAt = when {
-                            item.syncedAt > 0L -> item.syncedAt
-                            isDefinitelySynced -> verifiedTimeMs
-                            else -> 0L
-                        }
+                    timeGroups.forEach { group ->
+                        val isExpanded = !collapsedKeys.contains(group.key)
 
-                        val shortApp = item.packageName.substringAfterLast(".").ifBlank { item.packageName }
-                        val eventName = when {
-                            item.title.isNotBlank() -> "[$shortApp] ${item.title}"
-                            shortApp.isNotBlank() -> shortApp
-                            else -> "-"
-                        }
-
-                        val rowBg = if (index % 2 == 0) {
-                            MaterialTheme.colorScheme.surface
-                        } else {
-                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
-                        }
-
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(rowBg)
-                                .padding(horizontal = 8.dp, vertical = 7.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = eventName,
-                                modifier = Modifier
-                                    .weight(columns[0].weight)
-                                    .padding(horizontal = 2.dp),
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Medium,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-
-                            Text(
-                                text = formatTableDateTime(item.postedAt),
-                                modifier = Modifier
-                                    .weight(columns[1].weight)
-                                    .padding(horizontal = 2.dp),
-                                fontSize = 11.sp,
-                                textAlign = TextAlign.Center,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-
-                            Text(
-                                text = formatTableDateTime(effectiveSyncedAt),
-                                modifier = Modifier
-                                    .weight(columns[2].weight)
-                                    .padding(horizontal = 2.dp),
-                                fontSize = 11.sp,
-                                fontWeight = if (effectiveSyncedAt > 0L) FontWeight.SemiBold else FontWeight.Normal,
-                                textAlign = TextAlign.Center,
-                                color = if (effectiveSyncedAt > 0L) Color(0xFF2E7D32) else MaterialTheme.colorScheme.outline
-                            )
-
-                            Box(
-                                modifier = Modifier
-                                    .weight(columns[3].weight)
-                                    .padding(horizontal = 2.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                OutlinedButton(
-                                    onClick = { selectedNotification = Pair(item, effectiveSyncedAt) },
-                                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
-                                    modifier = Modifier.height(28.dp),
-                                    shape = RoundedCornerShape(6.dp)
-                                ) {
-                                    Text("보기", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                        item(key = "split_${group.key}") {
+                            TimeSplitSectionHeader(
+                                title = group.title,
+                                count = group.items.size,
+                                isExpanded = isExpanded,
+                                onToggle = {
+                                    collapsedKeys = if (isExpanded) {
+                                        collapsedKeys + group.key
+                                    } else {
+                                        collapsedKeys - group.key
+                                    }
                                 }
+                            )
+                        }
+
+                        if (isExpanded) {
+                            itemsIndexed(
+                                items = group.items,
+                                key = { _, item -> "${group.key}_${item.id}" }
+                            ) { index, item ->
+                                val isDefinitelySynced =
+                                    item.syncedAt > 0L || item.isSynced || (lastNotiTs > 0L && item.postedAt <= lastNotiTs)
+                                val effectiveSyncedAt = when {
+                                    item.syncedAt > 0L -> item.syncedAt
+                                    isDefinitelySynced -> verifiedTimeMs
+                                    else -> 0L
+                                }
+
+                                val shortApp = item.packageName.substringAfterLast(".").ifBlank { item.packageName }
+                                val eventName = when {
+                                    item.title.isNotBlank() -> "[$shortApp] ${item.title}"
+                                    shortApp.isNotBlank() -> shortApp
+                                    else -> "-"
+                                }
+
+                                val rowBg = if (index % 2 == 0) {
+                                    MaterialTheme.colorScheme.surface
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                                }
+
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(rowBg)
+                                        .padding(horizontal = 8.dp, vertical = 7.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = eventName,
+                                        modifier = Modifier
+                                            .weight(columns[0].weight)
+                                            .padding(horizontal = 2.dp),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+
+                                    Text(
+                                        text = formatTableDateTime(item.postedAt),
+                                        modifier = Modifier
+                                            .weight(columns[1].weight)
+                                            .padding(horizontal = 2.dp),
+                                        fontSize = 11.sp,
+                                        textAlign = TextAlign.Center,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+
+                                    Text(
+                                        text = formatTableDateTime(effectiveSyncedAt),
+                                        modifier = Modifier
+                                            .weight(columns[2].weight)
+                                            .padding(horizontal = 2.dp),
+                                        fontSize = 11.sp,
+                                        fontWeight = if (effectiveSyncedAt > 0L) FontWeight.SemiBold else FontWeight.Normal,
+                                        textAlign = TextAlign.Center,
+                                        color = if (effectiveSyncedAt > 0L) Color(0xFF2E7D32) else MaterialTheme.colorScheme.outline
+                                    )
+
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(columns[3].weight)
+                                            .padding(horizontal = 2.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        OutlinedButton(
+                                            onClick = { selectedNotification = Pair(item, effectiveSyncedAt) },
+                                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                                            modifier = Modifier.height(28.dp),
+                                            shape = RoundedCornerShape(6.dp)
+                                        ) {
+                                            Text("보기", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+                                }
+                                HorizontalDivider(
+                                    thickness = 0.5.dp,
+                                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                                )
                             }
                         }
-                        HorizontalDivider(
-                            thickness = 0.5.dp,
-                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
-                        )
                     }
                 }
             }
