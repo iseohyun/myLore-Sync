@@ -15,6 +15,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.google.android.gms.maps.CameraUpdateFactory
@@ -28,6 +29,7 @@ import com.iseohyun.mylore.sync.collector.GpsBackgroundProcessor
 import com.iseohyun.mylore.sync.collector.GpsProcessState
 import com.iseohyun.mylore.sync.collector.HealthGpsCollector
 import com.iseohyun.mylore.sync.data.local.AppDatabase
+import com.iseohyun.mylore.sync.data.local.entity.GpsPlaceEntity
 import com.iseohyun.mylore.sync.data.local.entity.HealthGpsDaySummaryEntity
 import com.iseohyun.mylore.sync.data.local.entity.HealthGpsPointEntity
 import com.iseohyun.mylore.sync.data.prefs.AppPreferences
@@ -54,6 +56,10 @@ private fun formatGpsHeaderDate(dateStr: String): String {
         dateStr
     }
 }
+
+/** 지도 경로 색: 운전 구간(녹색) / 그 외 구간(파란색) */
+private val ROUTE_COLOR_DRIVING = Color(0xFF2E9E4F)
+private val ROUTE_COLOR_DEFAULT = Color(0xFF1E88E5)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -279,7 +285,9 @@ fun HealthGpsScreen(
         ) {
             NativeGoogleMapView(
                 points = pointsForDay,
-                timeFormat = timeFormat
+                timeFormat = timeFormat,
+                db = db,
+                prefs = prefs
             )
 
             // 데이터 없는 날 안내 오버레이
@@ -352,7 +360,9 @@ fun HealthGpsScreen(
 @Composable
 private fun NativeGoogleMapView(
     points: List<HealthGpsPointEntity>,
-    timeFormat: SimpleDateFormat
+    timeFormat: SimpleDateFormat,
+    db: AppDatabase,
+    prefs: AppPreferences
 ) {
     val defaultCenter = remember { LatLng(37.5665, 126.9780) }
     val cameraPositionState = rememberCameraPositionState {
@@ -362,14 +372,28 @@ private fun NativeGoogleMapView(
     var isMapLoaded by remember { mutableStateOf(false) }
 
     // 폴리라인용 좌표 리스트
+    // (튀었다 되돌아오는 잡음 포인트는 저장은 유지하되 경로 선에서는 제외)
     val routeLatLngs = remember(points) {
-        points.map { LatLng(it.latitude, it.longitude) }
+        HealthGpsCollector.removeNoisePoints(points).map { LatLng(it.latitude, it.longitude) }
+    }
+
+    // 운전 구간(녹색)과 그 외 구간(파란색)으로 나눈 경로
+    val routeSegments = remember(points) {
+        HealthGpsCollector.splitRouteByDriving(HealthGpsCollector.removeNoisePoints(points))
     }
 
     // 체류 배지 포인트
     val stayPoints = remember(points) {
         points.filter { it.isStayPoint }
     }
+
+    // 사용자가 이름 붙인 장소 목록과, 지금 이름을 붙이는 중인 체류 지점
+    val places by db.healthGpsDao().getAllPlacesFlow().collectAsState(initial = emptyList())
+    var namingStay by remember { mutableStateOf<HealthGpsPointEntity?>(null) }
+
+    // 지도 리모컨: 체류 표시를 시간순(1 → 2 → 3 …)으로 오가며 볼 때 현재 선택된 번호 (-1 = 전체 보기)
+    var selectedStopIndex by remember(points) { mutableIntStateOf(-1) }
+    val remoteScope = rememberCoroutineScope()
 
     // 단일 위치 여부 판별 (모든 좌표가 반경 15m 이내인 경우)
     val isSingleArea = remember(routeLatLngs) {
@@ -406,119 +430,283 @@ private fun NativeGoogleMapView(
         }
     }
 
-    GoogleMap(
-        modifier = Modifier.fillMaxSize(),
-        cameraPositionState = cameraPositionState,
-        properties = MapProperties(
-            mapType = MapType.NORMAL,
-            isMyLocationEnabled = false
-        ),
-        uiSettings = MapUiSettings(
-            zoomControlsEnabled = true,
-            compassEnabled = true,
-            mapToolbarEnabled = false,
-            myLocationButtonEnabled = false
-        ),
-        onMapLoaded = { isMapLoaded = true }
-    ) {
-        // 1. 이동 동선 연결 선 (Polyline)
-        if (!isSingleArea && routeLatLngs.size >= 2) {
-            Polyline(
-                points = routeLatLngs,
-                color = Color(0xFF1E88E5),
-                width = 12f,
-                geodesic = true,
-                jointType = JointType.ROUND,
-                startCap = RoundCap(),
-                endCap = RoundCap()
-            )
-        }
-
-        // 2. 출발지 / 도착지 또는 단일 거점 배지
-        if (points.isNotEmpty()) {
-            val firstPt = points.first()
-            val firstPos = LatLng(firstPt.latitude, firstPt.longitude)
-            val firstTime = timeFormat.format(Date(firstPt.timestamp))
-
-            if (isSingleArea) {
-                MarkerComposable(
-                    keys = arrayOf<Any>("single", firstPt.timestamp, points.size),
-                    state = rememberUpdatedMarkerState(position = firstPos),
-                    anchor = Offset(0.5f, 1.0f),
-                    zIndex = 2f
-                ) {
-                    MapBadgeChip(
-                        text = "📍 위치 기록 ($firstTime)",
-                        backgroundColor = Color(0xFF1976D2)
+    Box(modifier = Modifier.fillMaxSize()) {
+        GoogleMap(
+            modifier = Modifier.fillMaxSize(),
+            cameraPositionState = cameraPositionState,
+            properties = MapProperties(
+                mapType = MapType.NORMAL,
+                isMyLocationEnabled = false
+            ),
+            uiSettings = MapUiSettings(
+                zoomControlsEnabled = true,
+                compassEnabled = true,
+                mapToolbarEnabled = false,
+                myLocationButtonEnabled = false
+            ),
+            onMapLoaded = { isMapLoaded = true }
+        ) {
+            // 1. 이동 동선 연결 선 (Polyline): 운전 구간은 녹색, 그 외는 파란색
+            if (!isSingleArea && routeLatLngs.size >= 2) {
+                routeSegments.forEach { segment ->
+                    Polyline(
+                        points = segment.points.map { LatLng(it.latitude, it.longitude) },
+                        color = if (segment.isDriving) ROUTE_COLOR_DRIVING else ROUTE_COLOR_DEFAULT,
+                        width = 12f,
+                        geodesic = true,
+                        jointType = JointType.ROUND,
+                        startCap = RoundCap(),
+                        endCap = RoundCap(),
+                        // 운전 구간이 다른 선 위에 보이도록
+                        zIndex = if (segment.isDriving) 1f else 0f
                     )
                 }
-            } else {
-                // 출발 마커
-                MarkerComposable(
-                    keys = arrayOf<Any>("start", firstPt.timestamp),
-                    state = rememberUpdatedMarkerState(position = firstPos),
-                    anchor = Offset(0.5f, 1.0f),
-                    zIndex = 2f
-                ) {
-                    MapBadgeChip(
-                        text = "🚩 출발 $firstTime",
-                        backgroundColor = Color(0xFF2E7D32)
-                    )
-                }
+            }
 
-                // 도착 마커
-                val lastPt = points.last()
-                val lastPos = LatLng(lastPt.latitude, lastPt.longitude)
-                val lastTime = timeFormat.format(Date(lastPt.timestamp))
+            // 2. 출발지 / 도착지 또는 단일 거점 배지
+            if (points.isNotEmpty()) {
+                val firstPt = points.first()
+                val firstPos = LatLng(firstPt.latitude, firstPt.longitude)
+                val firstTime = timeFormat.format(Date(firstPt.timestamp))
+
+                if (isSingleArea) {
+                    MarkerComposable(
+                        keys = arrayOf<Any>("single", firstPt.timestamp, points.size),
+                        state = rememberUpdatedMarkerState(position = firstPos),
+                        anchor = Offset(0.5f, 1.0f),
+                        zIndex = 2f
+                    ) {
+                        MapBadgeChip(
+                            text = "📍 위치 기록 ($firstTime)",
+                            backgroundColor = Color(0xFF1976D2)
+                        )
+                    }
+                } else {
+                    // 출발 마커
+                    MarkerComposable(
+                        keys = arrayOf<Any>("start", firstPt.timestamp),
+                        state = rememberUpdatedMarkerState(position = firstPos),
+                        anchor = Offset(0.5f, 1.0f),
+                        zIndex = 2f
+                    ) {
+                        MapBadgeChip(
+                            text = "🚩 출발 $firstTime",
+                            backgroundColor = Color(0xFF2E7D32)
+                        )
+                    }
+
+                    // 도착 마커
+                    val lastPt = points.last()
+                    val lastPos = LatLng(lastPt.latitude, lastPt.longitude)
+                    val lastTime = timeFormat.format(Date(lastPt.timestamp))
+                    MarkerComposable(
+                        keys = arrayOf<Any>("end", lastPt.timestamp),
+                        state = rememberUpdatedMarkerState(position = lastPos),
+                        anchor = Offset(0.5f, 1.0f),
+                        zIndex = 2f
+                    ) {
+                        MapBadgeChip(
+                            text = "🏁 도착 $lastTime",
+                            backgroundColor = Color(0xFFC62828)
+                        )
+                    }
+                }
+            }
+
+            // 3. 이동이 거의 없는 시간만 체류 배지로 표시
+            stayPoints.forEachIndexed { idx, stayPt ->
+                val stayPos = LatLng(stayPt.latitude, stayPt.longitude)
+                val startStr = timeFormat.format(Date(stayPt.stayStartTime))
+                val endStr = timeFormat.format(Date(stayPt.stayEndTime))
+                val durStr = HealthGpsCollector.formatDurationText(stayPt.stayDurationMinutes)
+
                 MarkerComposable(
-                    keys = arrayOf<Any>("end", lastPt.timestamp),
-                    state = rememberUpdatedMarkerState(position = lastPos),
-                    anchor = Offset(0.5f, 1.0f),
-                    zIndex = 2f
+                    keys = arrayOf<Any>("stay", idx, stayPt.timestamp, stayPt.stayDurationMinutes, idx == selectedStopIndex),
+                    state = rememberUpdatedMarkerState(position = stayPos),
+                    anchor = Offset(0.5f, 0.0f),
+                    zIndex = 3f,
+                    onClick = {
+                        selectedStopIndex = idx
+                        namingStay = stayPt
+                        true
+                    }
                 ) {
-                    MapBadgeChip(
-                        text = "🏁 도착 $lastTime",
-                        backgroundColor = Color(0xFFC62828)
-                    )
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (idx == selectedStopIndex) Color(0xFFE65100) else Color(0xFF6200EE),
+                        border = BorderStroke(1.5.dp, Color.White),
+                        shadowElevation = 4.dp
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                text = formatStayTag(stayPt),
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
                 }
             }
         }
 
-        // 3. 이동이 거의 없는 시간만 체류 배지로 표시
-        stayPoints.forEachIndexed { idx, stayPt ->
-            val stayPos = LatLng(stayPt.latitude, stayPt.longitude)
-            val startStr = timeFormat.format(Date(stayPt.stayStartTime))
-            val endStr = timeFormat.format(Date(stayPt.stayEndTime))
-            val durStr = HealthGpsCollector.formatDurationText(stayPt.stayDurationMinutes)
+        // 지도 리모컨 (체류 표시가 있을 때만)
+        if (stayPoints.isNotEmpty()) {
+            val selectedStay = stayPoints.getOrNull(selectedStopIndex)
 
-            MarkerComposable(
-                keys = arrayOf<Any>("stay", idx, stayPt.timestamp, stayPt.stayDurationMinutes),
-                state = rememberUpdatedMarkerState(position = stayPos),
-                anchor = Offset(0.5f, 0.0f),
-                zIndex = 3f
-            ) {
-                Surface(
-                    shape = RoundedCornerShape(12.dp),
-                    color = Color(0xFF6200EE),
-                    border = BorderStroke(1.5.dp, Color.White),
-                    shadowElevation = 4.dp
-                ) {
-                    Column(
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Text(
-                            text = "⏱️ $durStr",
-                            color = Color.White,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
+            fun moveToStop(index: Int) {
+                val target = stayPoints.getOrNull(index) ?: return
+                selectedStopIndex = index
+                remoteScope.launch {
+                    try {
+                        cameraPositionState.animate(
+                            CameraUpdateFactory.newLatLngZoom(LatLng(target.latitude, target.longitude), 16f),
+                            durationMs = 500
                         )
-                        Text(
-                            text = "$startStr ~ $endStr",
-                            color = Color(0xFFE0E0E0),
-                            fontSize = 9.sp
-                        )
+                    } catch (_: Exception) {
                     }
+                }
+            }
+
+            MapStopRemote(
+                // 하단 내비게이션(홈) 버튼에 가려지지 않도록 그 위로 띄움
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(bottom = 28.dp),
+                // 가운데: 이름이 있으면 장소 이름, 없으면 체류 시간대
+                centerText = when {
+                    selectedStay == null -> "전체 경로"
+                    else -> findPlaceFor(selectedStay, places)?.name ?: formatStayTag(selectedStay)
+                },
+                canGoPrevious = selectedStopIndex > 0,
+                canGoNext = selectedStopIndex < stayPoints.size - 1,
+                isStopSelected = selectedStay != null,
+                onPrevious = { moveToStop(selectedStopIndex - 1) },
+                onNext = { moveToStop(selectedStopIndex + 1) },
+                onCenterClick = { if (selectedStay != null) namingStay = selectedStay },
+                onShowAll = {
+                    selectedStopIndex = -1
+                    remoteScope.launch {
+                        try {
+                            val boundsBuilder = LatLngBounds.builder()
+                            routeLatLngs.forEach { boundsBuilder.include(it) }
+                            cameraPositionState.animate(
+                                CameraUpdateFactory.newLatLngBounds(boundsBuilder.build(), 140),
+                                durationMs = 500
+                            )
+                        } catch (_: Exception) {
+                        }
+                    }
+                }
+            )
+        }
+    }
+
+    // 체류 지점 이름 붙이기 (체류 태그 또는 리모컨 가운데를 눌렀을 때)
+    namingStay?.let { stay ->
+        val existingPlace = findPlaceFor(stay, places)
+        val wifiName = stay.sourceFileName.takeIf { it.startsWith("wifi_") }?.removePrefix("wifi_").orEmpty()
+        GpsPlaceNamingDialog(
+            latitude = stay.latitude,
+            longitude = stay.longitude,
+            stayTimeText = formatStayTag(stay),
+            initialName = existingPlace?.name ?: wifiName,
+            prefs = prefs,
+            onDismiss = { namingStay = null },
+            onSave = { newName ->
+                namingStay = null
+                remoteScope.launch(Dispatchers.IO) {
+                    db.healthGpsDao().upsertPlace(
+                        existingPlace?.copy(name = newName)
+                            ?: GpsPlaceEntity(name = newName, latitude = stay.latitude, longitude = stay.longitude)
+                    )
+                }
+            },
+            onDelete = existingPlace?.let { place ->
+                {
+                    namingStay = null
+                    remoteScope.launch(Dispatchers.IO) { db.healthGpsDao().deletePlace(place.id) }
+                }
+            }
+        )
+    }
+}
+
+/** 체류 태그 표기: "2:54 ~ 4:01 (01:07)" = 시작 ~ 종료 (머문 시간 시:분) */
+private fun formatStayTag(stay: HealthGpsPointEntity): String {
+    val clock = SimpleDateFormat("h:mm", Locale.KOREA)
+    val minutes = stay.stayDurationMinutes
+    val duration = String.format(Locale.US, "%02d:%02d", minutes / 60, minutes % 60)
+    return "${clock.format(Date(stay.stayStartTime))} ~ ${clock.format(Date(stay.stayEndTime))} ($duration)"
+}
+
+/** 체류 지점이 속한 "이름 붙인 장소"를 찾습니다. 반경 안에 여러 곳이 있으면 가장 가까운 곳. */
+private fun findPlaceFor(stay: HealthGpsPointEntity, places: List<GpsPlaceEntity>): GpsPlaceEntity? {
+    return places
+        .map { place ->
+            place to HealthGpsCollector.calculateDistanceMeters(
+                stay.latitude, stay.longitude, place.latitude, place.longitude
+            )
+        }
+        .filter { (place, distance) -> distance <= place.radiusMeters }
+        .minByOrNull { it.second }
+        ?.first
+}
+
+/**
+ * 지도 아래쪽 리모컨: ◀ ▶ 로 체류 표시를 시간 순서대로 이동합니다.
+ * 가운데에는 선택한 체류의 장소 이름(없으면 시간대)이 나오고, 누르면 이름을 붙이거나 고칩니다.
+ * 오른쪽 "전체"는 경로 전체 보기로 돌아갑니다.
+ */
+@Composable
+private fun MapStopRemote(
+    modifier: Modifier = Modifier,
+    centerText: String,
+    canGoPrevious: Boolean,
+    canGoNext: Boolean,
+    isStopSelected: Boolean,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit,
+    onCenterClick: () -> Unit,
+    onShowAll: () -> Unit
+) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(24.dp),
+        color = Color(0xE6212121),
+        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.6f)),
+        shadowElevation = 6.dp
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onPrevious, enabled = canGoPrevious) {
+                Text("◀", fontSize = 20.sp, color = if (canGoPrevious) Color.White else Color(0xFF757575))
+            }
+            Text(
+                text = centerText,
+                modifier = Modifier
+                    .widthIn(min = 110.dp, max = 190.dp)
+                    .clickable(enabled = isStopSelected) { onCenterClick() }
+                    .padding(horizontal = 6.dp, vertical = 12.dp),
+                color = Color.White,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            IconButton(onClick = onNext, enabled = canGoNext) {
+                Text("▶", fontSize = 20.sp, color = if (canGoNext) Color.White else Color(0xFF757575))
+            }
+            if (isStopSelected) {
+                TextButton(onClick = onShowAll) {
+                    Text("전체", fontSize = 12.sp, color = Color(0xFFBBDEFB))
                 }
             }
         }

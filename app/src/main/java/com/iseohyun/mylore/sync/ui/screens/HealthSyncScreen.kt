@@ -114,6 +114,8 @@ fun HealthSyncScreen(
 
     val dateFormat = remember { SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.KOREA) }
     val activeFolders = remember(healthRecords) { healthRecords.filter { it.isOnDevice } }
+    // 삭제는 PC 전송이 끝난(isSynced) 폴더만 대상으로 합니다.
+    val deletableFolders = remember(activeFolders) { activeFolders.filter { it.isSynced } }
     val latestSyncedRecord = remember(healthRecords) { healthRecords.maxByOrNull { it.lastDataTime } }
 
     val timeGroups = remember(healthRecords) {
@@ -190,9 +192,15 @@ fun HealthSyncScreen(
                 onClick = { showDeleteConfirmDialog = true },
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
                 modifier = Modifier.fillMaxWidth(),
-                enabled = !isDeleting
+                enabled = !isDeleting && deletableFolders.isNotEmpty()
             ) {
-                Text("🗑️ 모든 헬스 데이터 전송 완료 후 기기에서 삭제 (이력 유지)")
+                Text(
+                    if (deletableFolders.isNotEmpty()) {
+                        "🗑️ 전송 완료된 헬스 폴더 ${deletableFolders.size}개 기기에서 삭제 (이력 유지)"
+                    } else {
+                        "🗑️ 전송 완료된 폴더가 없어 삭제할 수 없습니다"
+                    }
+                )
             }
             Spacer(modifier = Modifier.height(8.dp))
         }
@@ -327,7 +335,7 @@ fun HealthSyncScreen(
             onDismissRequest = { showDeleteConfirmDialog = false },
             title = { Text("헬스 데이터 삭제 확인") },
             text = {
-                Text("기기 내 Download/Samsung Health 폴더의 원본 파일(${activeFolders.size}개 폴더)을 삭제하여 저장공간을 확보합니다. 삭제 후에도 마지막 전송 파일 종류와 시각은 앱에 유지됩니다.")
+                Text("기기 내 Download/Samsung Health 폴더 중 PC 전송이 완료된 ${deletableFolders.size}개 폴더의 원본 파일을 삭제하여 저장공간을 확보합니다. 아직 전송되지 않은 ${activeFolders.size - deletableFolders.size}개 폴더는 그대로 둡니다. 삭제 후에도 마지막 전송 파일 종류와 시각은 앱에 유지됩니다.")
             },
             confirmButton = {
                 Button(
@@ -337,22 +345,29 @@ fun HealthSyncScreen(
                         scope.launch(Dispatchers.IO) {
                             val now = System.currentTimeMillis()
                             val dao = db.syncCacheDao()
-                            val updated = dao.getAllHealthRecords().map {
-                                it.copy(
-                                    isSynced = true,
-                                    isOnDevice = false,
-                                    lastSharedTime = if (it.lastSharedTime > 0L) it.lastSharedTime else now
-                                )
-                            }
-                            dao.upsertHealthRecords(updated)
-
                             val root = File(Environment.getExternalStorageDirectory(), "Download/Samsung Health")
-                            if (root.exists()) {
-                                root.deleteRecursively()
+                            // 전송 완료가 확인된 폴더만 개별 삭제합니다. (미전송 폴더와 루트는 건드리지 않음)
+                            val targets = dao.getAllHealthRecords().filter { it.isOnDevice && it.isSynced }
+                            val removed = mutableListOf<HealthSyncCacheEntity>()
+                            for (record in targets) {
+                                val dir = File(root, record.folderName)
+                                // folderName에 경로 구분자가 섞여 루트 밖을 가리키는 경우는 삭제하지 않음
+                                if (dir.parentFile != root) continue
+                                if (!dir.exists() || dir.deleteRecursively()) {
+                                    removed.add(
+                                        record.copy(
+                                            isOnDevice = false,
+                                            lastSharedTime = if (record.lastSharedTime > 0L) record.lastSharedTime else now
+                                        )
+                                    )
+                                }
+                            }
+                            if (removed.isNotEmpty()) {
+                                dao.upsertHealthRecords(removed)
                             }
                             withContext(Dispatchers.Main) {
                                 isDeleting = false
-                                Toast.makeText(context, "원본 헬스 폴더가 삭제되었으며 전송 이력이 보존되었습니다.", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "전송 완료된 헬스 폴더 ${removed.size}개가 삭제되었으며 전송 이력이 보존되었습니다.", Toast.LENGTH_SHORT).show()
                                 refreshHealthCache()
                             }
                         }

@@ -305,8 +305,13 @@ data class SyncLocationLogItem(
     @SerializedName("note") val note: String = ""
 )
 
+/**
+ * 위치 로그 전송 요청.
+ * PC 서버(`handle_sync_location_logs`)는 배열 필드명을 `items`로 읽으므로 반드시 `items`로 직렬화합니다.
+ * (`logs`로 보내면 서버가 빈 요청으로 처리해 한 건도 저장하지 않습니다.)
+ */
 data class SyncLocationLogsRequest(
-    @SerializedName("logs") val logs: List<SyncLocationLogItem>
+    @SerializedName("items") val logs: List<SyncLocationLogItem>
 )
 
 
