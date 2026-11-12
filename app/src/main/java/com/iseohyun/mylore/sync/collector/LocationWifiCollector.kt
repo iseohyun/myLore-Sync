@@ -17,6 +17,7 @@ import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.iseohyun.mylore.sync.data.local.AppDatabase
@@ -69,6 +70,27 @@ class LocationWifiCollector(private val context: Context) {
 
         private var outingLocationListener: LocationListener? = null
 
+        // GPS 위성 위치가 들어오는 동안에는 네트워크(기지국·Wi-Fi) 위치를 받지 않기 위한 기준
+        private const val GPS_PRIORITY_WINDOW_MS = 15_000L
+
+        @Volatile
+        private var lastGpsFixElapsedMs: Long = 0L
+
+        /**
+         * GPS 우선 규칙: 최근 [GPS_PRIORITY_WINDOW_MS] 안에 GPS 위성 위치를 받았다면
+         * 그 사이에 끼어드는 다른 제공자(network/fused)의 위치는 버립니다.
+         * 내비게이션 중 매끄러운 GPS 경로 사이에 수백 m 떨어진 네트워크 위치가 섞여 지그재그가 되는 것을 막습니다.
+         */
+        private fun shouldDropNonGpsFix(location: Location): Boolean {
+            val nowElapsed = SystemClock.elapsedRealtime()
+            if (location.provider == LocationManager.GPS_PROVIDER) {
+                lastGpsFixElapsedMs = nowElapsed
+                return false
+            }
+            val last = lastGpsFixElapsedMs
+            return last > 0L && nowElapsed - last < GPS_PRIORITY_WINDOW_MS
+        }
+
         /**
          * 패시브 리스너(상시 5초/10m) 및 Wi-Fi 외출 감지 콜백을 등록합니다.
          */
@@ -88,6 +110,7 @@ class LocationWifiCollector(private val context: Context) {
                                 val lat = location.latitude
                                 val lng = location.longitude
                                 if (kotlin.math.abs(lat) < 0.0001 && kotlin.math.abs(lng) < 0.0001) return
+                                if (shouldDropNonGpsFix(location)) return
 
                                 val now = System.currentTimeMillis()
                                 lastPassiveFixReceivedAtMs = now
@@ -233,6 +256,7 @@ class LocationWifiCollector(private val context: Context) {
                         val lat = location.latitude
                         val lng = location.longitude
                         if (kotlin.math.abs(lat) < 0.0001 && kotlin.math.abs(lng) < 0.0001) return
+                        if (shouldDropNonGpsFix(location)) return
 
                         val item = SyncLocationLogItem(
                             eventType = "gps_outing",

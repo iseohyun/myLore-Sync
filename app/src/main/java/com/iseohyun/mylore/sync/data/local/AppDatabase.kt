@@ -25,9 +25,10 @@ import com.iseohyun.mylore.sync.data.local.entity.*
         HealthSyncCacheEntity::class,
         PhotoMediaCacheEntity::class,
         HealthGpsPointEntity::class,
-        HealthGpsDaySummaryEntity::class
+        HealthGpsDaySummaryEntity::class,
+        GpsPlaceEntity::class
     ],
-    version = 6,
+    version = 8,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -111,6 +112,28 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // GPS 잡음 필터용 위치 오차 반경(m). 기존 포인트는 0(알 수 없음)으로 둡니다.
+                db.execSQL("ALTER TABLE health_gps_points ADD COLUMN accuracyMeters REAL NOT NULL DEFAULT 0")
+            }
+        }
+
+        private val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 사용자가 이름을 붙인 장소 (GPS 체류 지점 이름)
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `gps_places` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`name` TEXT NOT NULL, " +
+                        "`latitude` REAL NOT NULL, " +
+                        "`longitude` REAL NOT NULL, " +
+                        "`radiusMeters` REAL NOT NULL, " +
+                        "`createdAt` INTEGER NOT NULL)"
+                )
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -118,8 +141,8 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "mylore_sync.db"
                 )
-                    .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
-                    .fallbackToDestructiveMigration()
+                    // 명세 4.2: 파괴적 마이그레이션 금지. 스키마 변경 시 반드시 Migration을 추가합니다.
+                    .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
                     .build()
                 INSTANCE = instance
                 instance

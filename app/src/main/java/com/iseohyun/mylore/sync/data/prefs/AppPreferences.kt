@@ -214,6 +214,50 @@ class AppPreferences(private val context: Context) {
         }
     }
 
+    /**
+     * 카톡 내보내기 폴더별로 "텍스트와 미디어가 모두 전송 완료된 대화 파일의 수정시각"을 기록/조회합니다.
+     * 같은 파일을 매 주기 다시 올리지 않기 위한 표식입니다. (기록 없음 = 0)
+     */
+    suspend fun getKakaoFolderSyncedFileModifiedAt(folderName: String): Long {
+        val key = longPreferencesKey("kakao_folder_${getRoomKeyHash(folderName)}_file_mod")
+        return context.dataStore.data.first()[key] ?: 0L
+    }
+
+    suspend fun setKakaoFolderSyncedFileModifiedAt(folderName: String, modifiedAt: Long) {
+        val key = longPreferencesKey("kakao_folder_${getRoomKeyHash(folderName)}_file_mod")
+        context.dataStore.edit { it[key] = modifiedAt }
+    }
+
+    /** PC로 업로드를 마친 마지막 GPS 동선 포인트의 id (`health_gps_points.id`). 이보다 큰 id만 다음에 전송합니다. */
+    suspend fun getLastUploadedGpsPointId(): Long {
+        return context.dataStore.data.first()[longPreferencesKey("last_uploaded_gps_point_id")] ?: 0L
+    }
+
+    suspend fun setLastUploadedGpsPointId(id: Long) {
+        val key = longPreferencesKey("last_uploaded_gps_point_id")
+        context.dataStore.edit { prefs ->
+            prefs[key] = maxOf(prefs[key] ?: 0L, id)
+        }
+    }
+
+    /** 앱 업데이트 후 한 번만 실행하는 정리·재계산 작업의 완료 여부 (작업별 키로 구분) */
+    suspend fun isOneTimeTaskDone(taskKey: String): Boolean {
+        return context.dataStore.data.first()[booleanPreferencesKey("one_time_task_$taskKey")] == true
+    }
+
+    suspend fun markOneTimeTaskDone(taskKey: String) {
+        context.dataStore.edit { it[booleanPreferencesKey("one_time_task_$taskKey")] = true }
+    }
+
+    /** 장소 이름 후보 조회를 위해 체류 좌표를 카카오로 보내는 데 사용자가 동의했는지 여부 */
+    suspend fun hasKakaoPlaceLookupConsent(): Boolean {
+        return context.dataStore.data.first()[booleanPreferencesKey("kakao_place_lookup_consent")] == true
+    }
+
+    suspend fun setKakaoPlaceLookupConsent(consented: Boolean) {
+        context.dataStore.edit { it[booleanPreferencesKey("kakao_place_lookup_consent")] = consented }
+    }
+
     suspend fun updateLastKakaoTs(ts: Long) {
         context.dataStore.edit { prefs ->
             prefs[KEY_LAST_KAKAO_TS] = maxOf(prefs[KEY_LAST_KAKAO_TS] ?: 0L, ts)

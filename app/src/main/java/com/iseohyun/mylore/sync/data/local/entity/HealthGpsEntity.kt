@@ -27,7 +27,9 @@ data class HealthGpsPointEntity(
     val stayDurationMinutes: Long = 0L, // 체류 시간 (분)
     val stayStartTime: Long = 0L,
     val stayEndTime: Long = 0L,
-    val sourceFileName: String = ""
+    val sourceFileName: String = "",
+    // 위치 오차 반경(m). 0 = 알 수 없음(파일에서 읽은 경로, v7 이전에 저장된 포인트)
+    val accuracyMeters: Double = 0.0
 )
 
 /**

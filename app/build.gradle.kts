@@ -12,6 +12,8 @@ val localProperties = Properties().apply {
     if (file.exists()) file.inputStream().use { load(it) }
 }
 val mapsApiKey: String = localProperties.getProperty("MAPS_API_KEY", "")
+// 카카오 로컬 API(주소·장소 조회) REST 키. 없으면 빈 값으로 빌드되고 조회 기능만 비활성화됩니다.
+val kakaoRestApiKey: String = localProperties.getProperty("KAKAO_REST_API_KEY", "")
 
 android {
     namespace = "com.iseohyun.mylore.sync"
@@ -28,6 +30,7 @@ android {
 
         manifestPlaceholders["MAPS_API_KEY"] = mapsApiKey
         buildConfigField("String", "MAPS_API_KEY", "\"$mapsApiKey\"")
+        buildConfigField("String", "KAKAO_REST_API_KEY", "\"$kakaoRestApiKey\"")
     }
 
     buildTypes {

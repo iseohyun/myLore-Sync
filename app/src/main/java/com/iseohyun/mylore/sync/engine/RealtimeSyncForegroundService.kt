@@ -41,11 +41,18 @@ class RealtimeSyncForegroundService : Service() {
     private var lastReconcileAtMs: Long = 0L
     private var isSessionActive: Boolean = false
 
+    /** 이번 프로세스에서 업로드에 성공한 삼성 헬스 파일 키(`경로|수정시각|크기`). 중단 후 재개 시 중복 전송 방지용 */
+    private val uploadedHealthFileKeys = mutableSetOf<String>()
+
     companion object {
         private const val CHANNEL_ID = "mylore_sync_channel"
         private const val NOTIFICATION_ID = 1001
         private const val IDLE_RECONCILE_INTERVAL_MS = 60_000L
         private const val RECENT_CALL_GRACE_PERIOD_MS = 60_000L
+
+        // 저장된 GPS 동선 포인트 업로드: 한 요청당 포인트 수 / 한 동기화 주기당 최대 요청 수
+        private const val GPS_UPLOAD_BATCH_SIZE = 300
+        private const val GPS_UPLOAD_MAX_BATCHES_PER_CYCLE = 10
 
         fun startService(context: Context) {
             val intent = Intent(context, RealtimeSyncForegroundService::class.java)
@@ -506,10 +513,10 @@ class RealtimeSyncForegroundService : Service() {
             val pendingMediaBytes = eligibleMedia.sumOf { it.length() }
             val skippedMediaBytes = (allMediaBytes - pendingMediaBytes).coerceAtLeast(0L)
 
-            val hasNewMessagesOrMedia = knownServerMsgTs <= 0L ||
-                kInfo.lastMessageTime > knownServerMsgTs ||
-                eligibleMedia.isNotEmpty() ||
-                kInfo.folder.exists()
+            // 이 폴더의 현재 대화 파일이 (미디어 포함) 이미 전송 완료된 파일과 같으면 다시 올리지 않습니다.
+            // 재내보내기로 파일이 바뀌었거나, 미디어 전송이 덜 끝난 경우에만 대상에 넣습니다.
+            val hasNewMessagesOrMedia =
+                ctx.prefs.getKakaoFolderSyncedFileModifiedAt(kInfo.folderName) != kInfo.modifiedAt
 
             if (hasNewMessagesOrMedia) {
                 ctx.pendingKakaoTasks.add(
@@ -600,7 +607,6 @@ class RealtimeSyncForegroundService : Service() {
                 val locJsons = File(folder, "jsons")
                     .walkTopDown()
                     .filter { it.isFile && it.name.contains("location_data") && it.extension == "json" }
-                    .take(50)
                     .toList()
                 val targetFiles = (csvs + locJsons).ifEmpty {
                     (folder.listFiles { f -> f.isFile && f.name.endsWith(".csv") }?.take(10) ?: emptyList())
@@ -729,6 +735,11 @@ class RealtimeSyncForegroundService : Service() {
                 ctx.db.notificationDao().deleteByIds(ackIds)
                 ctx.prefs.updateLastNotiTs(entity.postedAt)
                 ctx.notiSyncedCount++
+            } else {
+                // 실패 항목을 건너뛰고 뒤 항목을 보내면 워터마크가 실패 항목을 지나쳐
+                // "전송 완료"로 일괄 마킹되므로, 여기서 멈추고 다음 주기에 같은 항목부터 재시도합니다.
+                Log.w("SyncService", "Notification sync rejected (id=${entity.id}, http=${res.code()}); retry next cycle")
+                break
             }
             idx++
         }
@@ -795,8 +806,14 @@ class RealtimeSyncForegroundService : Service() {
             missingTotal
         } else emptySet()
 
+        // 통화 기록 전송이 한 번 실패하면 그 뒤(더 최신) 통화 기록은 이번 주기에 보내지 않습니다.
+        // 뒤 항목이 성공해 워터마크가 전진하면 실패한 기록이 "전송 완료"로 일괄 마킹되어 누락되기 때문입니다.
+        // 통화 기록이 없는 단독 녹음 이벤트는 해시 기준으로 관리되므로 계속 전송합니다.
+        var callLogSendBlocked = false
+
         for (event in ctx.pendingCallEvents) {
             if (!canContinueSession(ctx.monitor)) break
+            if (event.callLog != null && callLogSendBlocked) continue
 
             val callLogSentOk = if (event.callLog != null) {
                 try {
@@ -808,6 +825,9 @@ class RealtimeSyncForegroundService : Service() {
                 }
             } else {
                 true
+            }
+            if (!callLogSentOk) {
+                callLogSendBlocked = true
             }
 
             val rec = event.callRecording
@@ -987,6 +1007,8 @@ class RealtimeSyncForegroundService : Service() {
 
                     if (mediaUploadSuccessCount >= mediaWithHashes.size) {
                         roomSyncedBytes = task.fullFolderBytes
+                        // 텍스트 + 대상 미디어 전부 성공 → 다음 주기부터 이 파일은 재전송하지 않음
+                        ctx.prefs.setKakaoFolderSyncedFileModifiedAt(kInfo.folderName, kInfo.modifiedAt)
                     }
                     val sharedAt = System.currentTimeMillis()
                     ctx.prefs.updateRoomSyncProgress(
@@ -1122,18 +1144,30 @@ class RealtimeSyncForegroundService : Service() {
                     syncedBytes = ctx.healthSyncedBytes
                 )
             )
-            val syncedFolderNames = mutableSetOf<String>()
+            // 폴더는 전송 대상 파일이 "전부" 성공했을 때만 완료 처리합니다.
+            val expectedPerFolder = ctx.pendingHealthFiles.groupingBy { it.second.folderName }.eachCount()
+            val succeededPerFolder = mutableMapOf<String, Int>()
             var latestUploadedFileTs = 0L
 
             for ((file, entity) in ctx.pendingHealthFiles) {
                 if (!canContinueSession(ctx.monitor)) break
+                val fLen = file.length()
+                val fileKey = "${file.absolutePath}|${file.lastModified()}|$fLen"
+                if (uploadedHealthFileKeys.contains(fileKey)) {
+                    // 이전 주기에 이미 올린 파일은 다시 보내지 않고 성공으로 집계
+                    succeededPerFolder[entity.folderName] = (succeededPerFolder[entity.folderName] ?: 0) + 1
+                    latestUploadedFileTs = maxOf(latestUploadedFileTs, file.lastModified())
+                    ctx.healthSyncedCount++
+                    ctx.healthSyncedBytes += fLen
+                    continue
+                }
                 try {
-                    val fLen = file.length()
                     val reqBody = file.asRequestBody("text/plain".toMediaTypeOrNull())
                     val hRes = ctx.api.uploadSamsungHealth(ctx.token, reqBody)
                     if (hRes.isSuccessful && hRes.body()?.ok == true) {
                         ctx.didTransmitData = true
-                        syncedFolderNames.add(entity.folderName)
+                        uploadedHealthFileKeys.add(fileKey)
+                        succeededPerFolder[entity.folderName] = (succeededPerFolder[entity.folderName] ?: 0) + 1
                         latestUploadedFileTs = maxOf(latestUploadedFileTs, file.lastModified())
                         ctx.healthSyncedCount++
                         ctx.healthSyncedBytes += fLen
@@ -1145,6 +1179,9 @@ class RealtimeSyncForegroundService : Service() {
                 checkAndProcessMidSessionEvents(ctx)
             }
 
+            val syncedFolderNames = expectedPerFolder
+                .filter { (folderName, expected) -> (succeededPerFolder[folderName] ?: 0) >= expected }
+                .keys
             val sharedNow = System.currentTimeMillis()
             val updatedEntities = ctx.unsyncedHealthFolders.map { (_, entity) ->
                 if (syncedFolderNames.contains(entity.folderName)) {
@@ -1162,12 +1199,9 @@ class RealtimeSyncForegroundService : Service() {
                 ctx.prefs.updateLastHealthTs(maxOf(sharedNow, latestUploadedFileTs))
             }
         } else {
-            val sharedNow = System.currentTimeMillis()
-            cacheDao.upsertHealthRecords(
-                ctx.unsyncedHealthFolders.map { (_, entity) ->
-                    entity.copy(isSynced = true, lastSharedTime = sharedNow)
-                }
-            )
+            // 전송 대상 파일이 하나도 없는 폴더(내보내기 진행 중 등)는 아무것도 보내지 않았으므로
+            // 완료로 표시하지 않고, 스캔 결과(개수·용량)만 캐시에 반영합니다.
+            cacheDao.upsertHealthRecords(ctx.unsyncedHealthFolders.map { (_, entity) -> entity })
         }
     }
 
@@ -1304,6 +1338,65 @@ class RealtimeSyncForegroundService : Service() {
                 com.iseohyun.mylore.sync.collector.GpsBackgroundProcessor.enqueueLocationSnapshot(ctx.db, locSnapshot)
             }
         } catch (_: Exception) {
+        }
+
+        syncPendingGpsPoints(ctx)
+    }
+
+    /**
+     * 폰 DB에 쌓여 있는 실시간 GPS 동선 포인트 중 아직 PC로 올리지 않은 것을 묶음으로 전송합니다.
+     *
+     * 위 스냅샷 전송은 "지금 마지막으로 알려진 위치"만 보내므로, PC와 떨어져 있던 동안 수집된
+     * 이동 경로(패시브/외출/지도앱/Wi-Fi 포인트)는 이 함수가 올려야 PC에 도달합니다.
+     * 전송 완료 지점은 포인트 id로 기록하며, PC는 (기기·이벤트·SSID·좌표·분 단위)로 중복을 걸러 냅니다.
+     */
+    private suspend fun syncPendingGpsPoints(ctx: SessionSyncContext) {
+        try {
+            val dao = ctx.db.healthGpsDao()
+            var afterId = ctx.prefs.getLastUploadedGpsPointId()
+            var batchCount = 0
+            var uploadedCount = 0
+
+            while (batchCount < GPS_UPLOAD_MAX_BATCHES_PER_CYCLE && canContinueSession(ctx.monitor)) {
+                val points = dao.getRealtimePointsAfterId(afterId, GPS_UPLOAD_BATCH_SIZE)
+                if (points.isEmpty()) break
+
+                val logs = points.map { pt ->
+                    val src = pt.sourceFileName
+                    val wifiSsid = if (src.startsWith("wifi_")) src.removePrefix("wifi_") else ""
+                    SyncLocationLogItem(
+                        eventType = when {
+                            wifiSsid.isNotBlank() -> "wifi_connect"
+                            src == "map_gps" -> "gps_map_piggyback"
+                            src == "outing_gps" -> "gps_outing"
+                            else -> "gps_passive"
+                        },
+                        wifiSsid = wifiSsid,
+                        latitude = pt.latitude,
+                        longitude = pt.longitude,
+                        accuracyM = pt.accuracyMeters.takeIf { it > 0.0 },
+                        ts = pt.timestamp
+                    )
+                }
+
+                val res = ctx.api.syncLocationLogs(ctx.token, SyncLocationLogsRequest(logs))
+                if (!res.isSuccessful || res.body()?.ok != true) {
+                    Log.w("SyncService", "GPS point upload rejected (http=${res.code()}); retry next cycle")
+                    break
+                }
+
+                // 서버가 받았다고 확인한 묶음까지만 전송 완료 지점을 전진
+                afterId = points.last().id
+                ctx.prefs.setLastUploadedGpsPointId(afterId)
+                uploadedCount += points.size
+                batchCount++
+            }
+
+            if (uploadedCount > 0) {
+                Log.i("SyncService", "Uploaded $uploadedCount stored GPS points (lastId=$afterId)")
+            }
+        } catch (e: Exception) {
+            Log.w("SyncService", "GPS point upload failed: ${e.message}")
         }
     }
 

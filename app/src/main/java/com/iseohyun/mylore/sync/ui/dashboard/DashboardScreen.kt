@@ -10,36 +10,33 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import com.iseohyun.mylore.sync.collector.AppUsageCollector
 import com.iseohyun.mylore.sync.data.local.AppDatabase
-import com.iseohyun.mylore.sync.data.local.entity.SyncLogEntity
 import com.iseohyun.mylore.sync.data.prefs.AppPreferences
 import com.iseohyun.mylore.sync.data.remote.dto.PairingQrData
 import com.iseohyun.mylore.sync.engine.RealtimeSyncForegroundService
 import com.iseohyun.mylore.sync.engine.SyncConditionMonitor
-import com.iseohyun.mylore.sync.ui.businesscard.LiveCardScannerActivity
 import com.iseohyun.mylore.sync.ui.onboarding.QrScannerActivity
 import com.iseohyun.mylore.sync.ui.onboarding.executeQrPairingPipeline
 import com.iseohyun.mylore.sync.ui.screens.*
 import com.iseohyun.mylore.sync.ui.settings.SettingsScreen
 import kotlinx.coroutines.launch
-import java.text.SimpleDateFormat
-import java.util.*
 
 @Composable
 fun DashboardScreen(
@@ -52,7 +49,9 @@ fun DashboardScreen(
 
     ModalNavigationDrawer(
         drawerState = drawerState,
-        gesturesEnabled = currentItem != DrawerItem.GPS,
+        // GPS(지도) 화면에서는 지도 드래그와 겹치지 않도록 "닫힌 상태"의 열기 제스처만 끕니다.
+        // 메뉴가 열려 있을 때는 항상 켜서, 항목 대신 바깥 배경을 눌러도 메뉴가 닫히게 합니다.
+        gesturesEnabled = currentItem != DrawerItem.GPS || drawerState.isOpen,
         drawerContent = {
             ModalDrawerSheet(modifier = Modifier.width(280.dp)) {
                 Column(
@@ -202,7 +201,7 @@ fun DashboardScreen(
 private fun StatusDashboardContent(
     appPreferences: AppPreferences,
     onOpenDrawer: () -> Unit,
-    onNavigateToSettings: () -> Unit
+    @Suppress("UNUSED_PARAMETER") onNavigateToSettings: () -> Unit
 ) {
     val context = LocalContext.current
     val db = remember { AppDatabase.getInstance(context) }
@@ -210,23 +209,22 @@ private fun StatusDashboardContent(
     val pcIp by appPreferences.pcIp.collectAsState(initial = "")
     val pcPort by appPreferences.pcPort.collectAsState(initial = AppPreferences.DEFAULT_PORT)
     val pairingToken by appPreferences.pairingToken.collectAsState(initial = "")
-    val pcName by appPreferences.pcName.collectAsState(initial = "MYLORE-PC")
-    val serverSsid by appPreferences.serverSsid.collectAsState(initial = "")
-    val serverWifiPw by appPreferences.serverWifiPw.collectAsState(initial = "")
 
     var isCharging by remember { mutableStateOf(false) }
     var batteryPct by remember { mutableStateOf(100) }
-    var currentSsid by remember { mutableStateOf("") }
-    var isWifiConnected by remember { mutableStateOf(false) }
     var isPcReachable by remember { mutableStateOf(false) }
     var isSessionActive by remember { mutableStateOf(false) }
+    // 첫 서버 확인이 끝나기 전에는 "서버 없음"으로 단정하지 않습니다.
+    var hasCheckedOnce by remember { mutableStateOf(false) }
 
     val usageCollector = remember { AppUsageCollector(context) }
     var hasUsagePermission by remember { mutableStateOf(usageCollector.hasUsagePermission()) }
 
-    val logs by db.syncLogDao().getRecentLogsFlow().collectAsState(initial = emptyList())
     val monitor = remember { SyncConditionMonitor(context) }
     val scope = rememberCoroutineScope()
+
+    var statPeriod by rememberSaveable { mutableStateOf(StatPeriod.TODAY) }
+    var categoryStats by remember { mutableStateOf<List<SyncCategoryStat>>(emptyList()) }
 
     val qrLauncher = rememberLauncherForActivityResult(contract = ScanContract()) { result ->
         val rawContents = result.contents
@@ -262,23 +260,20 @@ private fun StatusDashboardContent(
         }
     }
 
-    LaunchedEffect(pcIp, pcPort, pairingToken, serverSsid) {
+    // 접속 상태(배터리·서버) 주기 점검 및 조건 충족 시 동기화 서비스 기동
+    LaunchedEffect(pcIp, pcPort, pairingToken) {
         while (true) {
             val batteryInfo = monitor.checkBatteryInfo()
             isCharging = batteryInfo.isCharging
             batteryPct = batteryInfo.batteryPct
 
-            val (wifiConn, ssid) = monitor.checkWifiInfo()
-            isWifiConnected = wifiConn
-            currentSsid = ssid
-
             val (reachable, _, _) = monitor.pingPcServer(pcIp, pcPort, pairingToken)
             isPcReachable = reachable
+            hasCheckedOnce = true
             hasUsagePermission = usageCollector.hasUsagePermission()
 
             val batteryOk = batteryInfo.isBatteryOk(isActiveSession = isSessionActive)
-            val isAllMet = batteryOk && reachable
-            if (isAllMet) {
+            if (batteryOk && reachable) {
                 if (!isSessionActive) {
                     isSessionActive = true
                     RealtimeSyncForegroundService.startService(context)
@@ -291,37 +286,72 @@ private fun StatusDashboardContent(
         }
     }
 
+    // 분류별 전송 통계: 기간을 바꾸면 즉시, 이후 5초마다 갱신
+    LaunchedEffect(statPeriod) {
+        while (true) {
+            categoryStats = loadSyncCategoryStats(context, db, appPreferences, statPeriod)
+            kotlinx.coroutines.delay(5000)
+        }
+    }
+
+    val batteryThreshold = if (isSessionActive) {
+        SyncConditionMonitor.BATTERY_RETENTION_THRESHOLD_PCT
+    } else {
+        SyncConditionMonitor.BATTERY_START_THRESHOLD_PCT
+    }
+    val isBatteryOk = isCharging || batteryPct >= batteryThreshold
+    val isServerMissing = hasCheckedOnce && !isPcReachable
+    val isConnected = isPcReachable && isBatteryOk
+
+    // 불만족 사유: 서버를 못 찾은 경우를 먼저, 그다음 배터리 조건
+    val statusText = when {
+        !hasCheckedOnce -> "확인 중"
+        isServerMissing -> "서버 없음 · QR 스캔"
+        !isBatteryOk -> "배터리 $batteryPct% (충전 필요)"
+        else -> "연결됨"
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .statusBarsPadding()
+            .navigationBarsPadding()
             .padding(horizontal = 16.dp, vertical = 8.dp)
     ) {
-        // Top Header
+        // 제목줄: 삼선 메뉴 · 앱 이름 · 접속 상태(오른쪽 정렬)
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onOpenDrawer) {
-                    Text("☰", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-                }
-                Spacer(modifier = Modifier.width(6.dp))
-                Column {
-                    Text("myLore Sync", fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                    Text("연결된 PC: $pcName ($pcIp:$pcPort)", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
+            IconButton(onClick = onOpenDrawer) {
+                Text("☰", fontSize = 24.sp, fontWeight = FontWeight.Bold)
             }
-
-            IconButton(onClick = onNavigateToSettings) {
-                Text("⚙️", fontSize = 20.sp)
-            }
+            Spacer(modifier = Modifier.width(6.dp))
+            Text("myLore Sync", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.weight(1f))
+            ConnectionStatusBadge(
+                isOk = isConnected,
+                isPending = !hasCheckedOnce,
+                text = statusText,
+                onClick = if (isServerMissing) {
+                    {
+                        val options = ScanOptions().apply {
+                            setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                            setPrompt("PC 화면의 myLore QR 코드를 스캔하세요")
+                            setCameraId(0)
+                            setBeepEnabled(true)
+                            setBarcodeImageEnabled(false)
+                            setCaptureActivity(QrScannerActivity::class.java)
+                        }
+                        qrLauncher.launch(options)
+                    }
+                } else null
+            )
         }
 
         Spacer(modifier = Modifier.height(14.dp))
 
-        // Usage Permission Notice Banner
+        // 앱 사용량 권한 안내 (권한이 없을 때만 표시)
         if (!hasUsagePermission) {
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -356,122 +386,72 @@ private fun StatusDashboardContent(
             Spacer(modifier = Modifier.height(12.dp))
         }
 
-        // 2 Conditions Status Card
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text("동기화 조건 실시간 상태", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                Spacer(modifier = Modifier.height(12.dp))
-
-                val isBatteryOk = isCharging || batteryPct >= if (isSessionActive) {
-                    SyncConditionMonitor.BATTERY_RETENTION_THRESHOLD_PCT
-                } else {
-                    SyncConditionMonitor.BATTERY_START_THRESHOLD_PCT
-                }
-                val batteryStatusText = when {
-                    isCharging -> "충전 중 ($batteryPct%)"
-                    batteryPct >= SyncConditionMonitor.BATTERY_START_THRESHOLD_PCT -> "충분 ($batteryPct% ≥ 80%)"
-                    isSessionActive && batteryPct >= SyncConditionMonitor.BATTERY_RETENTION_THRESHOLD_PCT ->
-                        "유지 중 ($batteryPct% ≥ 75%)"
-                    else -> "대기 ($batteryPct% - 충전 또는 80% 필요)"
-                }
-
-                StatusRow(
-                    label = "1. 배터리 (충전 중 or 80%↑)",
-                    value = batteryStatusText,
-                    isOk = isBatteryOk
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                StatusRow(
-                    label = "2. myLore 서버 연결",
-                    value = if (isPcReachable) "온라인 (Online)" else "오프라인 (클릭하여 QR 재연결)",
-                    isOk = isPcReachable,
-                    onClick = if (!isPcReachable) {
-                        {
-                            val options = ScanOptions().apply {
-                                setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                                setPrompt("PC 화면의 myLore QR 코드를 스캔하세요")
-                                setCameraId(0)
-                                setBeepEnabled(true)
-                                setBarcodeImageEnabled(false)
-                                setCaptureActivity(QrScannerActivity::class.java)
-                            }
-                            qrLauncher.launch(options)
-                        }
-                    } else null
-                )
-
-                if (!isPcReachable && serverSsid.isNotBlank() && !currentSsid.equals(serverSsid, ignoreCase = true)) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    StatusRow(
-                        label = "↳ 서버 Wi-Fi 접속",
-                        value = "미연결 (클릭하여 $serverSsid 연결)",
-                        isOk = false,
-                        onClick = {
-                            com.iseohyun.mylore.sync.engine.WifiConnector.connectOrSuggestWifi(context, serverSsid, serverWifiPw)
-                        }
-                    )
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(14.dp))
-
-        // Action Buttons
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Button(
-                onClick = {
-                    RealtimeSyncForegroundService.startService(context)
-                    Toast.makeText(context, "수동 동기화를 시작합니다.", Toast.LENGTH_SHORT).show()
-                },
-                modifier = Modifier.weight(1f)
-            ) {
-                Text("🔄 수동 동기화")
-            }
-
-            Button(
-                onClick = {
-                    val intent = Intent(context, LiveCardScannerActivity::class.java)
-                    context.startActivity(intent)
-                },
-                modifier = Modifier.weight(1f),
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-            ) {
-                Text("📷 실시간 누적 스캔")
-            }
-        }
-
-        Spacer(modifier = Modifier.height(14.dp))
-
-        // Live Log Feed
-        Text("실시간 전송 로그", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-        Spacer(modifier = Modifier.height(8.dp))
-
+        // 분류별 전송 현황 (가로 막대 그래프)
         Card(
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(1f)
+                .weight(1f),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
         ) {
-            if (logs.isEmpty()) {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("수집된 전송 로그가 없습니다.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(14.dp)
+            ) {
+                // 최근 전송 수 집계 기간 선택
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    StatPeriod.entries.forEach { period ->
+                        FilterChip(
+                            selected = statPeriod == period,
+                            onClick = { statPeriod = period },
+                            label = { Text(period.label, fontSize = 12.sp) }
+                        )
+                    }
                 }
-            } else {
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(8.dp)
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                // 인덱스(열 제목)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    items(logs) { log ->
-                        LogItemRow(log)
-                        HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                    Text(
+                        "분류",
+                        modifier = Modifier.width(CATEGORY_LABEL_WIDTH),
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        "전송 완성률",
+                        modifier = Modifier.weight(1f),
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        "${statPeriod.label} 전송",
+                        modifier = Modifier.width(RECENT_COUNT_WIDTH),
+                        fontSize = 11.sp,
+                        textAlign = TextAlign.End,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp))
+
+                if (categoryStats.isEmpty()) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator()
+                    }
+                } else {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        categoryStats.forEach { stat ->
+                            CategoryProgressRow(stat)
+                        }
                     }
                 }
             }
@@ -479,61 +459,94 @@ private fun StatusDashboardContent(
     }
 }
 
+private val CATEGORY_LABEL_WIDTH = 76.dp
+private val RECENT_COUNT_WIDTH = 70.dp
+private val STATUS_OK_COLOR = Color(0xFF4CAF50)
+private val STATUS_BAD_COLOR = Color(0xFFF44336)
+private val STATUS_PENDING_COLOR = Color(0xFF9E9E9E)
+
+/**
+ * 제목줄 오른쪽의 접속 상태 표시: 녹색 원(정상) / 빨간 원 + 불만족 사유.
+ * [onClick]이 있으면(서버를 못 찾은 경우) 눌러서 QR 스캔으로 이동합니다.
+ */
 @Composable
-private fun StatusRow(
-    label: String,
-    value: String,
+private fun ConnectionStatusBadge(
     isOk: Boolean,
-    onClick: (() -> Unit)? = null
+    isPending: Boolean,
+    text: String,
+    onClick: (() -> Unit)?
 ) {
-    val clickableModifier = if (onClick != null) {
+    val dotColor = when {
+        isPending -> STATUS_PENDING_COLOR
+        isOk -> STATUS_OK_COLOR
+        else -> STATUS_BAD_COLOR
+    }
+    val rowModifier = if (onClick != null) {
         Modifier
-            .fillMaxWidth()
             .clickable { onClick() }
-            .padding(vertical = 4.dp)
+            .padding(horizontal = 6.dp, vertical = 8.dp)
     } else {
-        Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp)
+        Modifier.padding(horizontal = 6.dp, vertical = 8.dp)
     }
 
-    Row(
-        modifier = clickableModifier,
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(label, fontSize = 14.sp)
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                modifier = Modifier
-                    .size(10.dp)
-                    .background(if (isOk) Color(0xFF4CAF50) else Color(0xFFF44336), CircleShape)
-            )
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(
-                value,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Medium,
-                color = if (!isOk && onClick != null) MaterialTheme.colorScheme.primary else Color.Unspecified
-            )
-        }
+    Row(modifier = rowModifier, verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            modifier = Modifier
+                .size(12.dp)
+                .background(dotColor, CircleShape)
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+            text,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            color = if (onClick != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+        )
     }
 }
 
+/** 분류 한 줄: 이름 · 전체 완성률 막대(보낸 수/전체 수) · 선택 기간의 전송 수 */
 @Composable
-private fun LogItemRow(log: SyncLogEntity) {
-    val dateFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
+private fun CategoryProgressRow(stat: SyncCategoryStat) {
+    val percent = (stat.completionRatio * 100).toInt()
+    val isComplete = stat.synced >= stat.total
+
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween
+        verticalAlignment = Alignment.CenterVertically
     ) {
+        Text(
+            "${stat.icon} ${stat.label}",
+            modifier = Modifier.width(CATEGORY_LABEL_WIDTH),
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1
+        )
         Column(modifier = Modifier.weight(1f)) {
-            Text("[${log.type}] ${log.message}", fontSize = 13.sp)
+            LinearProgressIndicator(
+                progress = { stat.completionRatio },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(12.dp)
+                    .clip(RoundedCornerShape(6.dp)),
+                color = if (isComplete) STATUS_OK_COLOR else MaterialTheme.colorScheme.primary,
+                trackColor = MaterialTheme.colorScheme.surface,
+                drawStopIndicator = {}
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                "$percent%  (${stat.synced} / ${stat.total})",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
         Text(
-            dateFormat.format(Date(log.timestamp)),
-            fontSize = 11.sp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            "${stat.recentSynced}건",
+            modifier = Modifier.width(RECENT_COUNT_WIDTH),
+            fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold,
+            textAlign = TextAlign.End
         )
     }
 }
