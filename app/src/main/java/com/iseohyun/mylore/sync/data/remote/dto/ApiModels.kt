@@ -218,7 +218,8 @@ data class SessionVolumesDto(
     @SerializedName("sms") val sms: VolumePlanItem = VolumePlanItem(),
     @SerializedName("call") val call: VolumePlanItem = VolumePlanItem(),
     @SerializedName("recording") val recording: VolumePlanItem = VolumePlanItem(),
-    @SerializedName("health") val health: VolumePlanItem = VolumePlanItem()
+    @SerializedName("health") val health: VolumePlanItem = VolumePlanItem(),
+    @SerializedName("photo") val photo: VolumePlanItem = VolumePlanItem()
 )
 
 data class SessionPlanRequest(
@@ -237,7 +238,8 @@ data class ClientLatestTimestampsDto(
     @SerializedName("last_sms_ts") val lastSmsTs: Long = 0L,
     @SerializedName("last_call_ts") val lastCallTs: Long = 0L,
     @SerializedName("last_recording_ts") val lastRecordingTs: Long = 0L,
-    @SerializedName("last_health_ts") val lastHealthTs: Long = 0L
+    @SerializedName("last_health_ts") val lastHealthTs: Long = 0L,
+    @SerializedName("last_photo_ts") val lastPhotoTs: Long = 0L
 )
 
 data class SyncCompleteRequest(
@@ -257,7 +259,8 @@ data class UnackedDomainsDto(
     @SerializedName("sms") val sms: UnackedDomainInfo? = null,
     @SerializedName("call") val call: UnackedDomainInfo? = null,
     @SerializedName("recording") val recording: UnackedDomainInfo? = null,
-    @SerializedName("health") val health: UnackedDomainInfo? = null
+    @SerializedName("health") val health: UnackedDomainInfo? = null,
+    @SerializedName("photo") val photo: UnackedDomainInfo? = null
 )
 
 data class SyncCompleteResponse(
@@ -287,3 +290,59 @@ data class SyncAckResponse(
     @SerializedName("acked_domain_count") val ackedDomainCount: Int = 0
 )
 
+
+data class SyncLocationLogItem(
+    @SerializedName("recorded_at") val recordedAt: String = "",
+    @SerializedName("event_type") val eventType: String = "movement",
+    @SerializedName("wifi_ssid") val wifiSsid: String = "",
+    @SerializedName("wifi_bssid") val wifiBssid: String = "",
+    @SerializedName("place_label") val placeLabel: String = "",
+    @SerializedName("latitude") val latitude: Double? = null,
+    @SerializedName("longitude") val longitude: Double? = null,
+    @SerializedName("accuracy_m") val accuracyM: Double? = null,
+    @SerializedName("battery_pct") val batteryPct: Int? = null,
+    @SerializedName("ts") val ts: Long = 0L,
+    @SerializedName("note") val note: String = ""
+)
+
+/**
+ * 위치 로그 전송 요청.
+ * PC 서버(`handle_sync_location_logs`)는 배열 필드명을 `items`로 읽으므로 반드시 `items`로 직렬화합니다.
+ * (`logs`로 보내면 서버가 빈 요청으로 처리해 한 건도 저장하지 않습니다.)
+ */
+data class SyncLocationLogsRequest(
+    @SerializedName("items") val logs: List<SyncLocationLogItem>
+)
+
+
+data class VoiceprintSessionResponse(
+    @SerializedName("ok") val ok: Boolean = false,
+    @SerializedName("phraseIdx") val phraseIdx: Int = 0,
+    @SerializedName("totalPhrases") val totalPhrases: Int = 5,
+    @SerializedName("phraseTitle") val phraseTitle: String = "",
+    @SerializedName("phraseText") val phraseText: String = "",
+    @SerializedName("sampleCount") val sampleCount: Int = 0,
+    @SerializedName("crossAgreementScore") val crossAgreementScore: Double = 0.0,
+    @SerializedName("consistencyA") val consistencyA: Double = 0.0,
+    @SerializedName("consistencyB") val consistencyB: Double = 0.0,
+    @SerializedName("error") val error: String? = null
+)
+
+data class VoiceprintEnrollRequest(
+    @SerializedName("audioBase64") val audioBase64: String,
+    @SerializedName("phraseText") val phraseText: String = "",
+    @SerializedName("fileExt") val fileExt: String = "m4a"
+)
+
+data class VoiceprintEnrollResponse(
+    @SerializedName("ok") val ok: Boolean = false,
+    @SerializedName("sampleCount") val sampleCount: Int = 0,
+    @SerializedName("crossAgreementScore") val crossAgreementScore: Double = 0.0,
+    @SerializedName("consistencyA") val consistencyA: Double = 0.0,
+    @SerializedName("consistencyB") val consistencyB: Double = 0.0,
+    @SerializedName("nextPhraseIdx") val nextPhraseIdx: Int = 0,
+    @SerializedName("totalPhrases") val totalPhrases: Int = 5,
+    @SerializedName("nextPhraseTitle") val nextPhraseTitle: String = "",
+    @SerializedName("nextPhraseText") val nextPhraseText: String = "",
+    @SerializedName("error") val error: String? = null
+)

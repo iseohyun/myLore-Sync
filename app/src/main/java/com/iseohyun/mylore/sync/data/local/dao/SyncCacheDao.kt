@@ -29,6 +29,12 @@ interface SyncCacheDao {
     @Query("UPDATE kakao_room_cache SET isOnDevice = 0")
     suspend fun markAllKakaoRoomsDeletedOnDevice()
 
+    @Query(
+        "UPDATE kakao_room_cache SET lastSharedTime = :verifiedAt " +
+            "WHERE (isOnDevice = 0 OR percent >= 100) AND lastSharedTime <= 0"
+    )
+    suspend fun backfillMissingKakaoSharedTime(verifiedAt: Long = System.currentTimeMillis())
+
     // ==================== 2. 문자(SMS/MMS/RCS) 캐시 ====================
     @Query("SELECT * FROM sms_cache ORDER BY ts DESC")
     fun getAllSmsFlow(): Flow<List<SmsCacheEntity>>
@@ -42,11 +48,28 @@ interface SyncCacheDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertSmsList(items: List<SmsCacheEntity>)
 
-    @Query("UPDATE sms_cache SET isSynced = 1 WHERE ts <= :watermarkTs AND isSynced = 0")
-    suspend fun markSmsSyncedUpTo(watermarkTs: Long)
+    @Query(
+        "UPDATE sms_cache SET isSynced = 1, " +
+            "syncedAt = CASE WHEN syncedAt > 0 THEN syncedAt ELSE :verifiedAt END " +
+            "WHERE ts <= :watermarkTs AND (isSynced = 0 OR syncedAt <= 0)"
+    )
+    suspend fun markSmsSyncedUpTo(
+        watermarkTs: Long,
+        verifiedAt: Long = System.currentTimeMillis()
+    )
 
-    @Query("UPDATE sms_cache SET isSynced = 1 WHERE id IN (:ids)")
-    suspend fun markSmsSyncedByIds(ids: List<Long>)
+    @Query(
+        "UPDATE sms_cache SET isSynced = 1, " +
+            "syncedAt = CASE WHEN syncedAt > 0 THEN syncedAt ELSE :syncedAt END " +
+            "WHERE id IN (:ids)"
+    )
+    suspend fun markSmsSyncedByIds(
+        ids: List<Long>,
+        syncedAt: Long = System.currentTimeMillis()
+    )
+
+    @Query("UPDATE sms_cache SET syncedAt = :verifiedAt WHERE isSynced = 1 AND syncedAt <= 0")
+    suspend fun backfillMissingSmsSyncedAt(verifiedAt: Long = System.currentTimeMillis())
 
     @Query("SELECT * FROM sms_cache WHERE isSynced = 0 ORDER BY ts ASC LIMIT :limit")
     suspend fun getUnsyncedSms(limit: Int = 500): List<SmsCacheEntity>
@@ -70,11 +93,28 @@ interface SyncCacheDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertCallLogs(items: List<CallLogCacheEntity>)
 
-    @Query("UPDATE call_log_cache SET isSynced = 1 WHERE ts <= :watermarkTs AND isSynced = 0")
-    suspend fun markCallLogsSyncedUpTo(watermarkTs: Long)
+    @Query(
+        "UPDATE call_log_cache SET isSynced = 1, " +
+            "syncedAt = CASE WHEN syncedAt > 0 THEN syncedAt ELSE :verifiedAt END " +
+            "WHERE ts <= :watermarkTs AND (isSynced = 0 OR syncedAt <= 0)"
+    )
+    suspend fun markCallLogsSyncedUpTo(
+        watermarkTs: Long,
+        verifiedAt: Long = System.currentTimeMillis()
+    )
 
-    @Query("UPDATE call_log_cache SET isSynced = 1 WHERE id IN (:ids)")
-    suspend fun markCallLogsSyncedByIds(ids: List<Long>)
+    @Query(
+        "UPDATE call_log_cache SET isSynced = 1, " +
+            "syncedAt = CASE WHEN syncedAt > 0 THEN syncedAt ELSE :syncedAt END " +
+            "WHERE id IN (:ids)"
+    )
+    suspend fun markCallLogsSyncedByIds(
+        ids: List<Long>,
+        syncedAt: Long = System.currentTimeMillis()
+    )
+
+    @Query("UPDATE call_log_cache SET syncedAt = :verifiedAt WHERE isSynced = 1 AND syncedAt <= 0")
+    suspend fun backfillMissingCallLogSyncedAt(verifiedAt: Long = System.currentTimeMillis())
 
     @Query("SELECT * FROM call_log_cache WHERE isSynced = 0 ORDER BY ts ASC LIMIT :limit")
     suspend fun getUnsyncedCallLogs(limit: Int = 500): List<CallLogCacheEntity>
@@ -101,11 +141,21 @@ interface SyncCacheDao {
     @Query("DELETE FROM recording_cache")
     suspend fun clearAllRecordings()
 
-    @Query("UPDATE recording_cache SET isSynced = 1 WHERE fileHash IN (:hashes)")
-    suspend fun markRecordingsSyncedByHashes(hashes: List<String>)
+    @Query(
+        "UPDATE recording_cache SET isSynced = 1, " +
+            "syncedAt = CASE WHEN syncedAt > 0 THEN syncedAt ELSE :syncedAt END " +
+            "WHERE fileHash IN (:hashes)"
+    )
+    suspend fun markRecordingsSyncedByHashes(
+        hashes: List<String>,
+        syncedAt: Long = System.currentTimeMillis()
+    )
 
-    @Query("UPDATE recording_cache SET isSynced = 1 WHERE recordedAt <= :watermarkTs AND isSynced = 0")
-    suspend fun markRecordingsSyncedUpTo(watermarkTs: Long)
+    @Query("UPDATE recording_cache SET syncedAt = :verifiedAt WHERE isSynced = 1 AND syncedAt <= 0")
+    suspend fun backfillMissingRecordingSyncedAt(verifiedAt: Long = System.currentTimeMillis())
+
+    @Query("UPDATE recording_cache SET isSynced = 0, syncedAt = 0")
+    suspend fun resetAllRecordingsSyncedState()
 
     @Query("SELECT MIN(recordedAt) FROM recording_cache WHERE isSynced = 0")
     suspend fun getOldestUnsyncedRecordingTs(): Long?
@@ -125,4 +175,49 @@ interface SyncCacheDao {
 
     @Query("UPDATE health_sync_cache SET isOnDevice = 0")
     suspend fun markAllHealthFoldersDeletedOnDevice()
+
+    // ==================== 6. 사진/동영상 미디어 캐시 ====================
+    @Query("SELECT * FROM photo_media_cache ORDER BY takenAt DESC")
+    fun getAllPhotoMediaFlow(): Flow<List<PhotoMediaCacheEntity>>
+
+    @Query("SELECT * FROM photo_media_cache")
+    suspend fun getAllPhotoMedia(): List<PhotoMediaCacheEntity>
+
+    @Query("SELECT * FROM photo_media_cache WHERE isSynced = 0 ORDER BY takenAt ASC")
+    suspend fun getUnsyncedPhotoMediaOldestFirst(): List<PhotoMediaCacheEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertPhotoMedia(items: List<PhotoMediaCacheEntity>)
+
+    @Query("UPDATE photo_media_cache SET fileHash = :fileHash WHERE filePath = :filePath")
+    suspend fun updatePhotoMediaHash(filePath: String, fileHash: String)
+
+    @Query("DELETE FROM photo_media_cache WHERE filePath NOT IN (:existingPaths)")
+    suspend fun removeDeletedPhotoMedia(existingPaths: List<String>)
+
+    @Query("DELETE FROM photo_media_cache")
+    suspend fun clearAllPhotoMedia()
+
+    @Query(
+        "UPDATE photo_media_cache SET isSynced = 1, " +
+            "syncedAt = CASE WHEN syncedAt > 0 THEN syncedAt ELSE :syncedAt END " +
+            "WHERE fileHash IN (:hashes)"
+    )
+    suspend fun markPhotoMediaSyncedByHashes(
+        hashes: List<String>,
+        syncedAt: Long = System.currentTimeMillis()
+    )
+
+    @Query(
+        "UPDATE photo_media_cache SET isSynced = 1, " +
+            "syncedAt = CASE WHEN syncedAt > 0 THEN syncedAt ELSE :syncedAt END " +
+            "WHERE filePath IN (:paths)"
+    )
+    suspend fun markPhotoMediaSyncedByPaths(
+        paths: List<String>,
+        syncedAt: Long = System.currentTimeMillis()
+    )
+
+    @Query("UPDATE photo_media_cache SET syncedAt = :verifiedAt WHERE isSynced = 1 AND syncedAt <= 0")
+    suspend fun backfillMissingPhotoMediaSyncedAt(verifiedAt: Long = System.currentTimeMillis())
 }

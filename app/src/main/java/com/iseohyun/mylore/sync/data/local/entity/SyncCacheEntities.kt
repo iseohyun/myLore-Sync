@@ -43,7 +43,8 @@ data class SmsCacheEntity(
     val body: String,
     val ts: Long,
     val type: String,
-    val isSynced: Boolean = false
+    val isSynced: Boolean = false,
+    val syncedAt: Long = 0L
 )
 
 /**
@@ -61,7 +62,8 @@ data class CallLogCacheEntity(
     val callType: String,
     val durationSec: Long,
     val ts: Long,
-    val isSynced: Boolean = false
+    val isSynced: Boolean = false,
+    val syncedAt: Long = 0L
 )
 
 /**
@@ -82,7 +84,8 @@ data class RecordingCacheEntity(
     val phoneNumber: String,
     val contactName: String,
     val recordedAt: Long,
-    val isSynced: Boolean = false
+    val isSynced: Boolean = false,
+    val syncedAt: Long = 0L
 )
 
 /**
@@ -105,4 +108,26 @@ data class HealthSyncCacheEntity(
     val lastModified: Long = 0L,
     val isSynced: Boolean = false,
     val isOnDevice: Boolean = true
+)
+
+/**
+ * 사진 및 동영상 미디어 캐시
+ * (Camera, Pictures, Screen recordings, Screenshots, Videocaptures 폴더 통합 관리)
+ */
+@Entity(
+    tableName = "photo_media_cache",
+    indices = [Index(value = ["takenAt"]), Index(value = ["fileHash"]), Index(value = ["isSynced"])]
+)
+data class PhotoMediaCacheEntity(
+    @PrimaryKey
+    val filePath: String,
+    val fileName: String,
+    val folderCategory: String,
+    val mediaType: String,
+    val fileSize: Long,
+    val lastModified: Long,
+    val takenAt: Long,
+    val fileHash: String = "",
+    val isSynced: Boolean = false,
+    val syncedAt: Long = 0L
 )

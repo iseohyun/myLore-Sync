@@ -1,9 +1,10 @@
 package com.iseohyun.mylore.sync.ui.screens
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -12,6 +13,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.iseohyun.mylore.sync.collector.SmsAndMmsCollector
@@ -19,9 +22,8 @@ import com.iseohyun.mylore.sync.data.local.AppDatabase
 import com.iseohyun.mylore.sync.data.prefs.AppPreferences
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.text.SimpleDateFormat
-import java.util.*
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun SmsListScreen(
     appPreferences: AppPreferences,
@@ -30,32 +32,60 @@ fun SmsListScreen(
     val context = LocalContext.current
     val db = remember { AppDatabase.getInstance(context) }
 
-    // 1. 기존 캐시된 문자 목록 즉시 렌더링 (0ms)
     val smsList by db.syncCacheDao().getAllSmsFlow().collectAsState(initial = emptyList())
     val lastSmsTs by appPreferences.lastSmsTs.collectAsState(initial = 0L)
+    var contactMap by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var isRefreshing by remember { mutableStateOf(true) }
+    val verifiedTimeMs = remember { System.currentTimeMillis() }
 
-    // 2. 백그라운드 지연 업데이트: 마지막 캐시 시점 이후에 새로 추가된 문자만 증분 조회
     LaunchedEffect(lastSmsTs) {
         isRefreshing = true
         withContext(Dispatchers.IO) {
+            contactMap = loadPhoneToNameMap(context)
             SmsAndMmsCollector(context).refreshSmsCache(db, lastSmsTs)
         }
         isRefreshing = false
     }
 
-    val dateFormat = remember { SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.KOREA) }
-
-    val pendingList = remember(smsList, lastSmsTs) {
-        smsList.filter { !it.isSynced && it.ts > lastSmsTs }
+    // 전송성공은 확실하나 시각정보(syncedAt)가 없다면 검증시각으로 DB 덮어쓰기
+    LaunchedEffect(smsList, lastSmsTs) {
+        val needsBackfill = smsList.any {
+            (it.isSynced || (lastSmsTs > 0L && it.ts <= lastSmsTs)) && it.syncedAt <= 0L
+        }
+        if (needsBackfill) {
+            val now = System.currentTimeMillis()
+            withContext(Dispatchers.IO) {
+                if (lastSmsTs > 0L) {
+                    db.syncCacheDao().markSmsSyncedUpTo(lastSmsTs, now)
+                }
+                db.syncCacheDao().backfillMissingSmsSyncedAt(now)
+            }
+        }
     }
-    val oldestPendingTs = remember(pendingList) { pendingList.minOfOrNull { it.ts } }
+
+    val pendingCount = remember(smsList, lastSmsTs) {
+        smsList.count { it.syncedAt <= 0L && !it.isSynced && (lastSmsTs <= 0L || it.ts > lastSmsTs) }
+    }
+
+    val timeGroups = remember(smsList) {
+        groupItemsByTimeSplit(smsList) { it.ts }
+    }
+    var collapsedKeys by remember { mutableStateOf(setOf<String>()) }
+
+    val columns = remember {
+        listOf(
+            TableColumnSpec("송수신", 0.14f, TextAlign.Center),
+            TableColumnSpec("대상", 0.30f, TextAlign.Start),
+            TableColumnSpec("이벤트시기", 0.28f, TextAlign.Center),
+            TableColumnSpec("전송시기", 0.28f, TextAlign.Center)
+        )
+    }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .statusBarsPadding()
-            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .padding(horizontal = 12.dp, vertical = 8.dp)
     ) {
         // Top Header
         Row(
@@ -67,13 +97,13 @@ fun SmsListScreen(
                 IconButton(onClick = onOpenDrawer) {
                     Text("☰", fontSize = 24.sp, fontWeight = FontWeight.Bold)
                 }
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("문자(SMS / MMS) 동기화", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("문자(SMS / MMS) 동기화", fontSize = 19.sp, fontWeight = FontWeight.Bold)
             }
 
             if (isRefreshing) {
                 Text(
-                    "🔄 추가 문자 확인 중...",
+                    "🔄 확인 중...",
                     fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.primary,
                     fontWeight = FontWeight.Medium
@@ -81,39 +111,43 @@ fun SmsListScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
         // Summary Card
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
         ) {
-            Column(modifier = Modifier.padding(14.dp)) {
-                Text("✉️ 문자 보유 현황", fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                Spacer(modifier = Modifier.height(6.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text("보유 총 문자: ${smsList.size}건", fontSize = 13.sp)
-                    Text(
-                        "미전송: ${pendingList.size}건",
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = if (pendingList.isNotEmpty()) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
-                    )
-                }
-                Spacer(modifier = Modifier.height(4.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("✉️ 총 보유 문자: ${smsList.size}건", fontWeight = FontWeight.Bold, fontSize = 13.sp)
                 Text(
-                    "아직 서버로 전송하지 않은 가장 오래된 문자 시점: " +
-                            if (oldestPendingTs != null) dateFormat.format(Date(oldestPendingTs)) else "모두 전송됨",
+                    "전송완료: ${smsList.size - pendingCount}건 · 미전송: ${pendingCount}건",
                     fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSecondaryContainer
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (pendingCount > 0) MaterialTheme.colorScheme.error else Color(0xFF2E7D32)
                 )
             }
         }
 
-        Spacer(modifier = Modifier.height(14.dp))
+        Spacer(modifier = Modifier.height(6.dp))
+
+        TimeSplitTabControlBar(
+            groups = timeGroups,
+            collapsedKeys = collapsedKeys,
+            onToggleGroup = { key ->
+                collapsedKeys = if (collapsedKeys.contains(key)) collapsedKeys - key else collapsedKeys + key
+            },
+            onExpandAll = { collapsedKeys = emptySet() },
+            onCollapseAll = { collapsedKeys = timeGroups.map { it.key }.toSet() }
+        )
+
+        Spacer(modifier = Modifier.height(6.dp))
 
         if (smsList.isEmpty() && isRefreshing) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -124,66 +158,118 @@ fun SmsListScreen(
                 Text("기기에 저장된 문자가 없습니다.", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         } else {
-            LazyColumn(
+            Surface(
                 modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                shape = RoundedCornerShape(8.dp),
+                tonalElevation = 1.dp
             ) {
-                items(smsList, key = { it.id }) { item ->
-                    val isSynced = item.isSynced || (lastSmsTs > 0L && item.ts <= lastSmsTs)
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-                    ) {
-                        Column(modifier = Modifier.padding(12.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(
-                                        if (item.type == "sent") "📤 발신" else "📥 수신",
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(item.address, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                LazyColumn(modifier = Modifier.fillMaxSize()) {
+                    stickyHeader {
+                        StickyTableHeader(columns = columns)
+                    }
+
+                    timeGroups.forEach { group ->
+                        val isExpanded = !collapsedKeys.contains(group.key)
+
+                        item(key = "split_${group.key}") {
+                            TimeSplitSectionHeader(
+                                title = group.title,
+                                count = group.items.size,
+                                isExpanded = isExpanded,
+                                onToggle = {
+                                    collapsedKeys = if (isExpanded) {
+                                        collapsedKeys + group.key
+                                    } else {
+                                        collapsedKeys - group.key
+                                    }
+                                }
+                            )
+                        }
+
+                        if (isExpanded) {
+                            itemsIndexed(
+                                items = group.items,
+                                key = { _, item -> "${group.key}_${item.id}" }
+                            ) { index, item ->
+                                val isDefinitelySynced =
+                                    item.syncedAt > 0L || item.isSynced || (lastSmsTs > 0L && item.ts <= lastSmsTs)
+                                val effectiveSyncedAt = when {
+                                    item.syncedAt > 0L -> item.syncedAt
+                                    isDefinitelySynced -> verifiedTimeMs
+                                    else -> 0L
                                 }
 
-                                Box(
+                                val dirLabel = when (item.type) {
+                                    "sent" -> "송신"
+                                    "inbox" -> "수신"
+                                    else -> "-"
+                                }
+                                val targetLabel = resolveContactOrPhone(
+                                    rawPhoneOrAddress = item.address,
+                                    contactMap = contactMap
+                                )
+
+                                val rowBg = if (index % 2 == 0) {
+                                    MaterialTheme.colorScheme.surface
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                                }
+
+                                Row(
                                     modifier = Modifier
-                                        .background(
-                                            if (isSynced) Color(0xFFE8F5E9) else Color(0xFFFFEBEE),
-                                            RoundedCornerShape(4.dp)
-                                        )
-                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                        .fillMaxWidth()
+                                        .background(rowBg)
+                                        .padding(horizontal = 8.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(
-                                        if (isSynced) "서버 전송 완료" else "전송 대기",
+                                        text = dirLabel,
+                                        modifier = Modifier
+                                            .weight(columns[0].weight)
+                                            .padding(horizontal = 2.dp),
                                         fontSize = 11.sp,
-                                        color = if (isSynced) Color(0xFF2E7D32) else Color(0xFFC62828),
-                                        fontWeight = FontWeight.Medium
+                                        fontWeight = FontWeight.Bold,
+                                        textAlign = TextAlign.Center,
+                                        color = if (dirLabel == "송신") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary
+                                    )
+
+                                    Text(
+                                        text = targetLabel,
+                                        modifier = Modifier
+                                            .weight(columns[1].weight)
+                                            .padding(horizontal = 2.dp),
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+
+                                    Text(
+                                        text = formatTableDateTime(item.ts),
+                                        modifier = Modifier
+                                            .weight(columns[2].weight)
+                                            .padding(horizontal = 2.dp),
+                                        fontSize = 11.sp,
+                                        textAlign = TextAlign.Center,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+
+                                    Text(
+                                        text = formatTableDateTime(effectiveSyncedAt),
+                                        modifier = Modifier
+                                            .weight(columns[3].weight)
+                                            .padding(horizontal = 2.dp),
+                                        fontSize = 11.sp,
+                                        fontWeight = if (effectiveSyncedAt > 0L) FontWeight.SemiBold else FontWeight.Normal,
+                                        textAlign = TextAlign.Center,
+                                        color = if (effectiveSyncedAt > 0L) Color(0xFF2E7D32) else MaterialTheme.colorScheme.outline
                                     )
                                 }
+                                HorizontalDivider(
+                                    thickness = 0.5.dp,
+                                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                                )
                             }
-
-                            Spacer(modifier = Modifier.height(6.dp))
-
-                            Text(
-                                item.body,
-                                fontSize = 13.sp,
-                                maxLines = 4,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-
-                            Spacer(modifier = Modifier.height(6.dp))
-
-                            Text(
-                                dateFormat.format(Date(item.ts)),
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.align(Alignment.End)
-                            )
                         }
                     }
                 }

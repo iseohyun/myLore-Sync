@@ -4,7 +4,10 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import com.iseohyun.mylore.sync.data.local.dao.BusinessCardDao
+import com.iseohyun.mylore.sync.data.local.dao.HealthGpsDao
 import com.iseohyun.mylore.sync.data.local.dao.NotificationDao
 import com.iseohyun.mylore.sync.data.local.dao.SyncCacheDao
 import com.iseohyun.mylore.sync.data.local.dao.SyncLogDao
@@ -19,9 +22,13 @@ import com.iseohyun.mylore.sync.data.local.entity.*
         SmsCacheEntity::class,
         CallLogCacheEntity::class,
         RecordingCacheEntity::class,
-        HealthSyncCacheEntity::class
+        HealthSyncCacheEntity::class,
+        PhotoMediaCacheEntity::class,
+        HealthGpsPointEntity::class,
+        HealthGpsDaySummaryEntity::class,
+        GpsPlaceEntity::class
     ],
-    version = 3,
+    version = 8,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -30,10 +37,102 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun syncLogDao(): SyncLogDao
     abstract fun businessCardDao(): BusinessCardDao
     abstract fun syncCacheDao(): SyncCacheDao
+    abstract fun healthGpsDao(): HealthGpsDao
 
     companion object {
         @Volatile
         private var INSTANCE: AppDatabase? = null
+
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE pending_notifications ADD COLUMN syncedAt INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE sms_cache ADD COLUMN syncedAt INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE call_log_cache ADD COLUMN syncedAt INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE recording_cache ADD COLUMN syncedAt INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `photo_media_cache` (" +
+                        "`filePath` TEXT NOT NULL, " +
+                        "`fileName` TEXT NOT NULL, " +
+                        "`folderCategory` TEXT NOT NULL, " +
+                        "`mediaType` TEXT NOT NULL, " +
+                        "`fileSize` INTEGER NOT NULL, " +
+                        "`lastModified` INTEGER NOT NULL, " +
+                        "`takenAt` INTEGER NOT NULL, " +
+                        "`fileHash` TEXT NOT NULL, " +
+                        "`isSynced` INTEGER NOT NULL DEFAULT 0, " +
+                        "`syncedAt` INTEGER NOT NULL DEFAULT 0, " +
+                        "PRIMARY KEY(`filePath`))"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_photo_media_cache_takenAt` ON `photo_media_cache` (`takenAt`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_photo_media_cache_fileHash` ON `photo_media_cache` (`fileHash`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_photo_media_cache_isSynced` ON `photo_media_cache` (`isSynced`)")
+            }
+        }
+
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `health_gps_points` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`date` TEXT NOT NULL, " +
+                        "`timestamp` INTEGER NOT NULL, " +
+                        "`latitude` REAL NOT NULL, " +
+                        "`longitude` REAL NOT NULL, " +
+                        "`altitude` REAL NOT NULL, " +
+                        "`isStayPoint` INTEGER NOT NULL, " +
+                        "`stayDurationMinutes` INTEGER NOT NULL, " +
+                        "`stayStartTime` INTEGER NOT NULL, " +
+                        "`stayEndTime` INTEGER NOT NULL, " +
+                        "`sourceFileName` TEXT NOT NULL)"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_health_gps_points_date` ON `health_gps_points` (`date`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_health_gps_points_timestamp` ON `health_gps_points` (`timestamp`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_health_gps_points_isStayPoint` ON `health_gps_points` (`isStayPoint`)")
+
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `health_gps_day_summaries` (" +
+                        "`date` TEXT PRIMARY KEY NOT NULL, " +
+                        "`pointCount` INTEGER NOT NULL, " +
+                        "`startTime` INTEGER NOT NULL, " +
+                        "`endTime` INTEGER NOT NULL, " +
+                        "`totalDistanceMeters` REAL NOT NULL, " +
+                        "`stayCount` INTEGER NOT NULL, " +
+                        "`totalStayDurationMinutes` INTEGER NOT NULL, " +
+                        "`centerLat` REAL NOT NULL, " +
+                        "`centerLng` REAL NOT NULL, " +
+                        "`updatedAt` INTEGER NOT NULL)"
+                )
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_health_gps_day_summaries_date` ON `health_gps_day_summaries` (`date`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_health_gps_day_summaries_startTime` ON `health_gps_day_summaries` (`startTime`)")
+            }
+        }
+
+        private val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // GPS 잡음 필터용 위치 오차 반경(m). 기존 포인트는 0(알 수 없음)으로 둡니다.
+                db.execSQL("ALTER TABLE health_gps_points ADD COLUMN accuracyMeters REAL NOT NULL DEFAULT 0")
+            }
+        }
+
+        private val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 사용자가 이름을 붙인 장소 (GPS 체류 지점 이름)
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `gps_places` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`name` TEXT NOT NULL, " +
+                        "`latitude` REAL NOT NULL, " +
+                        "`longitude` REAL NOT NULL, " +
+                        "`radiusMeters` REAL NOT NULL, " +
+                        "`createdAt` INTEGER NOT NULL)"
+                )
+            }
+        }
 
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
@@ -41,7 +140,10 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "mylore_sync.db"
-                ).fallbackToDestructiveMigration().build()
+                )
+                    // 명세 4.2: 파괴적 마이그레이션 금지. 스키마 변경 시 반드시 Migration을 추가합니다.
+                    .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
+                    .build()
                 INSTANCE = instance
                 instance
             }

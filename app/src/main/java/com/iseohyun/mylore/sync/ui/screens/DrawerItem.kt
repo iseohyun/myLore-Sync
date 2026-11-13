@@ -6,7 +6,9 @@ enum class DrawerItem(val title: String, val icon: String, val isSecondary: Bool
     CALL("통화", "📞"),
     NOTIFICATION("알림", "🔔"),
     RECORDINGS("녹음", "🎙️"),
+    PHOTO("사진", "🖼️"),
     HEALTH("헬스", "🏃"),
+    GPS("GPS", "📍"),
     BUSINESS_CARD("명함", "📇", isSecondary = true),
     STATUS("상태", "📊", isSecondary = true),
     SETTINGS("설정", "⚙️", isSecondary = true)

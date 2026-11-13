@@ -1,8 +1,19 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.ksp)
 }
+
+// Google Maps API 키는 저장소에 올리지 않고 local.properties(MAPS_API_KEY=...)에서 읽습니다.
+val localProperties = Properties().apply {
+    val file = rootProject.file("local.properties")
+    if (file.exists()) file.inputStream().use { load(it) }
+}
+val mapsApiKey: String = localProperties.getProperty("MAPS_API_KEY", "")
+// 카카오 로컬 API(주소·장소 조회) REST 키. 없으면 빈 값으로 빌드되고 조회 기능만 비활성화됩니다.
+val kakaoRestApiKey: String = localProperties.getProperty("KAKAO_REST_API_KEY", "")
 
 android {
     namespace = "com.iseohyun.mylore.sync"
@@ -16,6 +27,10 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        manifestPlaceholders["MAPS_API_KEY"] = mapsApiKey
+        buildConfigField("String", "MAPS_API_KEY", "\"$mapsApiKey\"")
+        buildConfigField("String", "KAKAO_REST_API_KEY", "\"$kakaoRestApiKey\"")
     }
 
     buildTypes {
@@ -33,6 +48,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 
@@ -78,6 +94,10 @@ dependencies {
 
     // Coil Image Loading
     implementation(libs.coil.compose)
+
+    // Google Maps SDK for Android
+    implementation(libs.play.services.maps)
+    implementation(libs.maps.compose)
 
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
