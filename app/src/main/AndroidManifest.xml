@@ -107,6 +107,21 @@
             android:label="스마트 명함 지갑"
             android:theme="@style/Theme.MyLoreSync" />
 
+        <!-- 다른 앱의 공유 메뉴에서 글을 받아 저장 (예: 에이닷 전화의 통화 요약·스크립트). 화면 없이 저장 후 닫힘 -->
+        <activity
+            android:name=".ui.share.ShareReceiverActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:label="myLore에 저장"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/*" />
+            </intent-filter>
+        </activity>
+
         <service
             android:name=".collector.MyloreNotificationListener"
             android:exported="true"

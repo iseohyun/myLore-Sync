@@ -346,3 +346,24 @@ data class VoiceprintEnrollResponse(
     @SerializedName("nextPhraseText") val nextPhraseText: String = "",
     @SerializedName("error") val error: String? = null
 )
+
+
+/** 에이닷 전화 "텍스트로 저장" 파일 한 건 (통화 요약 + 화자별 스크립트) */
+data class SyncCallTranscriptItem(
+    /** 원래 파일 이름. 통화 녹음 파일과 이름 규칙이 같아 PC가 통화를 찾는 데 씁니다. */
+    @SerializedName("file_name") val fileName: String,
+    /** UTF-8로 변환한 본문 */
+    @SerializedName("text") val text: String,
+    @SerializedName("modified_at") val modifiedAt: Long = 0L
+)
+
+data class SyncCallTranscriptsRequest(
+    @SerializedName("items") val items: List<SyncCallTranscriptItem>
+)
+
+data class SyncCallTranscriptsResponse(
+    @SerializedName("ok") val ok: Boolean = false,
+    @SerializedName("saved_count") val savedCount: Int = 0,
+    /** PC가 받았다고 확인한 파일 이름 (이미 같은 내용으로 저장돼 있던 것 포함) */
+    @SerializedName("ack_names") val ackNames: List<String> = emptyList()
+)

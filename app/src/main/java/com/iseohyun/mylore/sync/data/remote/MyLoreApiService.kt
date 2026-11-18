@@ -135,6 +135,12 @@ interface MyLoreApiService {
         @Body body: RequestBody
     ): Response<SyncResponse>
 
+    @POST("/api/v1/sync/call-transcripts")
+    suspend fun syncCallTranscripts(
+        @Header("X-MyLore-Token") token: String,
+        @Body request: SyncCallTranscriptsRequest
+    ): Response<SyncCallTranscriptsResponse>
+
     @POST("/api/v1/sync/location-logs")
     suspend fun syncLocationLogs(
         @Header("X-MyLore-Token") token: String,

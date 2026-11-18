@@ -44,6 +44,9 @@ class RealtimeSyncForegroundService : Service() {
     /** 이번 프로세스에서 업로드에 성공한 삼성 헬스 파일 키(`경로|수정시각|크기`). 중단 후 재개 시 중복 전송 방지용 */
     private val uploadedHealthFileKeys = mutableSetOf<String>()
 
+    /** 에이닷 스크립트 전송을 쉬는 기한(ms). PC가 받았다는 확인을 주지 않으면 설정됩니다. */
+    private var adotUploadPausedUntilMs: Long = 0L
+
     companion object {
         private const val CHANNEL_ID = "mylore_sync_channel"
         private const val NOTIFICATION_ID = 1001
@@ -53,6 +56,12 @@ class RealtimeSyncForegroundService : Service() {
         // 저장된 GPS 동선 포인트 업로드: 한 요청당 포인트 수 / 한 동기화 주기당 최대 요청 수
         private const val GPS_UPLOAD_BATCH_SIZE = 300
         private const val GPS_UPLOAD_MAX_BATCHES_PER_CYCLE = 10
+
+        // 에이닷 통화 스크립트 업로드: 한 요청당 파일 수 (파일 하나가 약 10KB)
+        private const val ADOT_TRANSCRIPT_BATCH_SIZE = 10
+
+        // PC가 에이닷 스크립트 수신을 지원하지 않을 때 다시 시도하기까지의 간격
+        private const val ADOT_UNSUPPORTED_RETRY_INTERVAL_MS = 10 * 60 * 1000L
 
         fun startService(context: Context) {
             val intent = Intent(context, RealtimeSyncForegroundService::class.java)
@@ -1341,6 +1350,65 @@ class RealtimeSyncForegroundService : Service() {
         }
 
         syncPendingGpsPoints(ctx)
+        syncAdotTranscripts(ctx)
+    }
+
+    /**
+     * 에이닷 전화에서 "텍스트로 저장"한 통화 요약·스크립트(`Download/A.phone` 폴더의 txt 파일)를 PC로 보냅니다.
+     *
+     * PC는 파일 이름(통화 녹음과 같은 규칙)으로 통화를 찾아 참고용 문서로 저장합니다.
+     * PC가 받았다고 확인(`ack_names`)한 파일만 전송 완료로 기록하므로, 이 주소가 없는 구버전 PC에서는
+     * 아무것도 기록되지 않고 다음 주기에 다시 시도합니다.
+     */
+    private suspend fun syncAdotTranscripts(ctx: SessionSyncContext) {
+        try {
+            if (!canContinueSession(ctx.monitor)) return
+            // PC가 이 기능을 아직 지원하지 않는 것으로 확인되면 한동안 다시 보내지 않음
+            if (System.currentTimeMillis() < adotUploadPausedUntilMs) return
+
+            val newFiles = AdotTranscriptCollector()
+                .collectNewTranscripts(ctx.prefs.getUploadedAdotTranscriptKeys())
+            if (newFiles.isEmpty()) return
+
+            var uploadedCount = 0
+            for (batch in newFiles.chunked(ADOT_TRANSCRIPT_BATCH_SIZE)) {
+                if (!canContinueSession(ctx.monitor)) break
+
+                val res = ctx.api.syncCallTranscripts(
+                    ctx.token,
+                    SyncCallTranscriptsRequest(
+                        batch.map { SyncCallTranscriptItem(it.fileName, it.text, it.modifiedAt) }
+                    )
+                )
+                val body = res.body()
+                if (!res.isSuccessful || body?.ok != true) {
+                    Log.w("SyncService", "Adot transcript upload rejected (http=${res.code()}); retry next cycle")
+                    break
+                }
+
+                val ackedNames = body.ackNames.toSet()
+                val ackedKeys = batch.filter { it.fileName in ackedNames }.map { it.contentKey }
+                if (ackedKeys.isEmpty()) {
+                    // 구버전 PC는 모르는 주소에도 ok를 돌려주지만 받은 파일 이름(ack_names)은 주지 않음
+                    adotUploadPausedUntilMs = System.currentTimeMillis() + ADOT_UNSUPPORTED_RETRY_INTERVAL_MS
+                    Log.i("SyncService", "PC did not acknowledge ${batch.size} Adot transcripts (not supported yet?); retry later")
+                    break
+                }
+                ctx.prefs.addUploadedAdotTranscriptKeys(ackedKeys)
+                uploadedCount += ackedKeys.size
+            }
+
+            if (uploadedCount > 0) {
+                Log.i("SyncService", "Uploaded $uploadedCount Adot call transcripts")
+            }
+        } catch (e: CancellationException) {
+            // 동기화 주기 재시작에 따른 취소는 오류가 아니므로 그대로 전달
+            throw e
+        } catch (e: Exception) {
+            // 구버전 PC는 이 주소에 JSON이 아닌 응답을 돌려줘 해석에 실패함 → 매 주기 다시 보내지 않고 한동안 쉼
+            adotUploadPausedUntilMs = System.currentTimeMillis() + ADOT_UNSUPPORTED_RETRY_INTERVAL_MS
+            Log.w("SyncService", "Adot transcript upload failed: ${e.message}")
+        }
     }
 
     /**
@@ -1395,6 +1463,9 @@ class RealtimeSyncForegroundService : Service() {
             if (uploadedCount > 0) {
                 Log.i("SyncService", "Uploaded $uploadedCount stored GPS points (lastId=$afterId)")
             }
+        } catch (e: CancellationException) {
+            // 동기화 주기 재시작에 따른 취소는 오류가 아니므로 그대로 전달
+            throw e
         } catch (e: Exception) {
             Log.w("SyncService", "GPS point upload failed: ${e.message}")
         }
