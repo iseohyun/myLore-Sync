@@ -9,6 +9,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import com.iseohyun.mylore.sync.data.local.dao.BusinessCardDao
 import com.iseohyun.mylore.sync.data.local.dao.HealthGpsDao
 import com.iseohyun.mylore.sync.data.local.dao.NotificationDao
+import com.iseohyun.mylore.sync.data.local.entity.SharedNoteDao
 import com.iseohyun.mylore.sync.data.local.dao.SyncCacheDao
 import com.iseohyun.mylore.sync.data.local.dao.SyncLogDao
 import com.iseohyun.mylore.sync.data.local.entity.*
@@ -26,9 +27,10 @@ import com.iseohyun.mylore.sync.data.local.entity.*
         PhotoMediaCacheEntity::class,
         HealthGpsPointEntity::class,
         HealthGpsDaySummaryEntity::class,
-        GpsPlaceEntity::class
+        GpsPlaceEntity::class,
+        SharedNoteEntity::class
     ],
-    version = 8,
+    version = 9,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -38,6 +40,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun businessCardDao(): BusinessCardDao
     abstract fun syncCacheDao(): SyncCacheDao
     abstract fun healthGpsDao(): HealthGpsDao
+    abstract fun sharedNoteDao(): SharedNoteDao
 
     companion object {
         @Volatile
@@ -134,6 +137,24 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 다른 앱에서 공유로 넘겨받은 글 (통화 요약·스크립트 등)
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `shared_notes` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`sourcePackage` TEXT NOT NULL, " +
+                        "`subject` TEXT NOT NULL, " +
+                        "`rawText` TEXT NOT NULL, " +
+                        "`receivedAt` INTEGER NOT NULL, " +
+                        "`isSynced` INTEGER NOT NULL, " +
+                        "`syncedAt` INTEGER NOT NULL)"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_shared_notes_receivedAt` ON `shared_notes` (`receivedAt`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_shared_notes_isSynced` ON `shared_notes` (`isSynced`)")
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -142,7 +163,7 @@ abstract class AppDatabase : RoomDatabase() {
                     "mylore_sync.db"
                 )
                     // 명세 4.2: 파괴적 마이그레이션 금지. 스키마 변경 시 반드시 Migration을 추가합니다.
-                    .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
+                    .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
                     .build()
                 INSTANCE = instance
                 instance

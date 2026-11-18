@@ -258,6 +258,19 @@ class AppPreferences(private val context: Context) {
         context.dataStore.edit { it[booleanPreferencesKey("kakao_place_lookup_consent")] = consented }
     }
 
+    /** PC로 전송을 마친 에이닷 스크립트 파일의 내용 키 목록 (같은 내용을 다시 보내지 않기 위함) */
+    suspend fun getUploadedAdotTranscriptKeys(): Set<String> {
+        return context.dataStore.data.first()[stringSetPreferencesKey("uploaded_adot_transcript_keys")] ?: emptySet()
+    }
+
+    suspend fun addUploadedAdotTranscriptKeys(keys: Collection<String>) {
+        if (keys.isEmpty()) return
+        val prefKey = stringSetPreferencesKey("uploaded_adot_transcript_keys")
+        context.dataStore.edit { prefs ->
+            prefs[prefKey] = (prefs[prefKey] ?: emptySet()) + keys
+        }
+    }
+
     suspend fun updateLastKakaoTs(ts: Long) {
         context.dataStore.edit { prefs ->
             prefs[KEY_LAST_KAKAO_TS] = maxOf(prefs[KEY_LAST_KAKAO_TS] ?: 0L, ts)
