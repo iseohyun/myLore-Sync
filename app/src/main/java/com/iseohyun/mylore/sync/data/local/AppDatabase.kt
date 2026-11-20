@@ -8,6 +8,7 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.iseohyun.mylore.sync.data.local.dao.BusinessCardDao
 import com.iseohyun.mylore.sync.data.local.dao.HealthGpsDao
+import com.iseohyun.mylore.sync.data.local.dao.KakaoReadEventDao
 import com.iseohyun.mylore.sync.data.local.dao.NotificationDao
 import com.iseohyun.mylore.sync.data.local.entity.SharedNoteDao
 import com.iseohyun.mylore.sync.data.local.dao.SyncCacheDao
@@ -28,9 +29,10 @@ import com.iseohyun.mylore.sync.data.local.entity.*
         HealthGpsPointEntity::class,
         HealthGpsDaySummaryEntity::class,
         GpsPlaceEntity::class,
-        SharedNoteEntity::class
+        SharedNoteEntity::class,
+        KakaoReadEventEntity::class
     ],
-    version = 9,
+    version = 10,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -41,6 +43,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun syncCacheDao(): SyncCacheDao
     abstract fun healthGpsDao(): HealthGpsDao
     abstract fun sharedNoteDao(): SharedNoteDao
+    abstract fun kakaoReadEventDao(): KakaoReadEventDao
 
     companion object {
         @Volatile
@@ -155,6 +158,27 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // PC가 카톡 방 열쇠를 정할 수 있게 합치기 전 제목(EXTRA_TITLE)과 대화방 제목을 따로 둡니다.
+                // 이미 받은 알림은 빈 값으로 둡니다.
+                db.execSQL("ALTER TABLE pending_notifications ADD COLUMN rawTitle TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE pending_notifications ADD COLUMN convTitle TEXT NOT NULL DEFAULT ''")
+                // 휴대폰에서 읽혀 사라진 카톡 알림 (PC 카톡 자동 꺼내기가 읽은 방을 고를 때 씀)
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `pending_kakao_read_events` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`title` TEXT NOT NULL, " +
+                        "`rawTitle` TEXT NOT NULL, " +
+                        "`convTitle` TEXT NOT NULL, " +
+                        "`subText` TEXT NOT NULL, " +
+                        "`postedAt` INTEGER NOT NULL, " +
+                        "`removedAt` INTEGER NOT NULL, " +
+                        "`reason` INTEGER NOT NULL)"
+                )
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -163,7 +187,10 @@ abstract class AppDatabase : RoomDatabase() {
                     "mylore_sync.db"
                 )
                     // 명세 4.2: 파괴적 마이그레이션 금지. 스키마 변경 시 반드시 Migration을 추가합니다.
-                    .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
+                    .addMigrations(
+                        MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9,
+                        MIGRATION_9_10
+                    )
                     .build()
                 INSTANCE = instance
                 instance

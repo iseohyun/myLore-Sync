@@ -121,16 +121,44 @@ data class CheckHashesResponse(
 data class SyncNotificationItem(
     @SerializedName("id") val id: Long,
     @SerializedName("pkg") val pkg: String,
+    /** 합친 제목 (`"대화방 제목 (EXTRA_TITLE)"` 또는 EXTRA_TITLE) */
     @SerializedName("title") val title: String,
     @SerializedName("text") val text: String,
     @SerializedName("sub_text") val subText: String = "",
-    @SerializedName("ts") val ts: Long
+    @SerializedName("ts") val ts: Long,
+    /** 합치기 전 EXTRA_TITLE. PC가 카톡 방 열쇠를 정할 때 씁니다(예전 PC는 무시). */
+    @SerializedName("raw_title") val rawTitle: String = "",
+    /** EXTRA_CONVERSATION_TITLE */
+    @SerializedName("conv_title") val convTitle: String = ""
 )
 
 data class SyncNotificationsRequest(
     @SerializedName("items") val items: List<SyncNotificationItem>,
     @SerializedName("current_index") val currentIndex: Int = 1,
     @SerializedName("total_count") val totalCount: Int = 1
+)
+
+/**
+ * 휴대폰에서 읽혀 사라진 카톡 알림 한 건 (`POST /api/v1/sync/kakao-read-events`).
+ * PC 카톡 자동 꺼내기가 "휴대폰에서 이미 읽은 방"만 열 때 씁니다. 응답은 [SyncResponse]의 `ack_ids`입니다.
+ */
+data class SyncKakaoReadEventItem(
+    @SerializedName("id") val id: Long,
+    /** 알림 동기화의 `title`과 같은 합친 제목 */
+    @SerializedName("title") val title: String,
+    @SerializedName("raw_title") val rawTitle: String,
+    @SerializedName("conv_title") val convTitle: String,
+    @SerializedName("sub_text") val subText: String,
+    /** 사라진 알림이 떴던 시각(ms) */
+    @SerializedName("posted_ts") val postedTs: Long,
+    /** 알림이 사라진 시각(ms) */
+    @SerializedName("removed_ts") val removedTs: Long,
+    /** `NotificationListenerService.REASON_*` (1 누름, 8 · 9 카톡이 지움) */
+    @SerializedName("reason") val reason: Int
+)
+
+data class SyncKakaoReadEventsRequest(
+    @SerializedName("items") val items: List<SyncKakaoReadEventItem>
 )
 
 data class SyncSmsItem(
