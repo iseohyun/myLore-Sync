@@ -50,4 +50,7 @@ interface NotificationDao {
 
     @Query("SELECT COUNT(*) FROM pending_notifications WHERE isSynced = 0")
     suspend fun getPendingCount(): Int
+
+    @Query("SELECT COUNT(*) FROM pending_notifications WHERE isSynced = 0 AND packageName = :packageName")
+    suspend fun getPendingCountForPackage(packageName: String): Int
 }

@@ -72,6 +72,13 @@ interface MyLoreApiService {
         @Body request: SyncNotificationsRequest
     ): Response<SyncResponse>
 
+    /** 휴대폰에서 읽혀 사라진 카톡 알림. 이 주소가 없는 예전 PC는 404를 돌려줍니다. */
+    @POST("/api/v1/sync/kakao-read-events")
+    suspend fun syncKakaoReadEvents(
+        @Header("X-MyLore-Token") token: String,
+        @Body request: SyncKakaoReadEventsRequest
+    ): Response<SyncResponse>
+
     @POST("/api/v1/sync/sms")
     suspend fun syncSms(
         @Header("X-MyLore-Token") token: String,

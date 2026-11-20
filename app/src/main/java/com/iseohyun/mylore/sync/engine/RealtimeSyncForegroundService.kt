@@ -63,6 +63,10 @@ class RealtimeSyncForegroundService : Service() {
         // PC가 에이닷 스크립트 수신을 지원하지 않을 때 다시 시도하기까지의 간격
         private const val ADOT_UNSUPPORTED_RETRY_INTERVAL_MS = 10 * 60 * 1000L
 
+        // 카톡 읽음 기록 전송: 한 요청당 건수(PC와 정한 상한) / 한 동기화 주기당 최대 요청 수
+        private const val KAKAO_READ_EVENT_BATCH_SIZE = 200
+        private const val KAKAO_READ_EVENT_MAX_BATCHES_PER_CYCLE = 10
+
         fun startService(context: Context) {
             val intent = Intent(context, RealtimeSyncForegroundService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -341,6 +345,7 @@ class RealtimeSyncForegroundService : Service() {
 
         // [Step 3] 가장 오래된 내용(Oldest-First)부터 전송 시작 (방안 A: 경량 텍스트 우선 ➔ 대용량 파일)
         syncPendingNotifications(ctx)
+        syncPendingKakaoReadEvents(ctx)
         syncPendingSms(ctx)
         syncPendingCallEvents(ctx)
         syncPendingKakaoTasks(ctx)
@@ -728,7 +733,9 @@ class RealtimeSyncForegroundService : Service() {
                 title = entity.title,
                 text = entity.text,
                 subText = entity.subText,
-                ts = entity.postedAt
+                ts = entity.postedAt,
+                rawTitle = entity.rawTitle,
+                convTitle = entity.convTitle
             )
             val res = ctx.api.syncNotifications(
                 ctx.token,
@@ -751,6 +758,85 @@ class RealtimeSyncForegroundService : Service() {
                 break
             }
             idx++
+        }
+    }
+
+    /**
+     * [Step 3-1b] 휴대폰에서 읽혀 사라진 카톡 알림(읽음 기록)을 PC로 보냅니다.
+     *
+     * PC 카톡 자동 꺼내기는 방을 열면 읽음 처리되므로, 이 기록으로 "휴대폰에서 이미 읽은 방"만 엽니다.
+     * - 한 요청에 [KAKAO_READ_EVENT_BATCH_SIZE]개까지 보내고, PC가 받았다고 확인한 `ack_ids`만 지웁니다.
+     * - 404(이 주소가 없는 예전 PC)나 그 밖의 실패면 지우지 않고 이번 주기의 이 단계를 멈춥니다.
+     *   다음 주기에 다시 보냅니다.
+     * - 아직 PC로 보내지 못한 카톡 알림이 있으면 기다립니다. 읽은 뒤에 온 새 알림보다 읽음 기록이 먼저 가면
+     *   PC가 읽지 않은 메시지가 있는 방을 읽은 방으로 잘못 볼 수 있기 때문입니다.
+     */
+    private suspend fun syncPendingKakaoReadEvents(ctx: SessionSyncContext) {
+        try {
+            if (!canContinueSession(ctx.monitor)) return
+            val dao = ctx.db.kakaoReadEventDao()
+            if (dao.getPendingCount() == 0) return
+
+            val unsentKakaoNotis = ctx.db.notificationDao()
+                .getPendingCountForPackage(KakaoNotificationRules.KAKAO_PACKAGE)
+            if (unsentKakaoNotis > 0) {
+                Log.i("SyncService", "Kakao read events wait for $unsentKakaoNotis unsent Kakao notifications")
+                return
+            }
+
+            var batchCount = 0
+            var ackedCount = 0
+            while (batchCount < KAKAO_READ_EVENT_MAX_BATCHES_PER_CYCLE && canContinueSession(ctx.monitor)) {
+                val events = dao.getOldest(KAKAO_READ_EVENT_BATCH_SIZE)
+                if (events.isEmpty()) break
+
+                val res = ctx.api.syncKakaoReadEvents(
+                    ctx.token,
+                    SyncKakaoReadEventsRequest(
+                        events.map { e ->
+                            SyncKakaoReadEventItem(
+                                id = e.id,
+                                title = e.title,
+                                rawTitle = e.rawTitle,
+                                convTitle = e.convTitle,
+                                subText = e.subText,
+                                postedTs = e.postedAt,
+                                removedTs = e.removedAt,
+                                reason = e.reason
+                            )
+                        }
+                    )
+                )
+                val body = res.body()
+                if (!res.isSuccessful || body?.ok != true) {
+                    Log.w("SyncService", "Kakao read events rejected (http=${res.code()}); retry next cycle")
+                    break
+                }
+
+                // 보낸 것 가운데 PC가 받았다고 확인한 항목만 지움
+                val sentIds = events.map { it.id }.toSet()
+                val ackedIds = body.ackIds.filter { it in sentIds }.distinct()
+                if (ackedIds.isEmpty()) {
+                    Log.w("SyncService", "PC acknowledged none of ${events.size} Kakao read events; retry next cycle")
+                    break
+                }
+                dao.deleteByIds(ackedIds)
+                ackedCount += ackedIds.size
+                batchCount++
+
+                // 일부만 받았으면 남은 것은 다음 주기에 다시 보냄 (이번 주기에 같은 항목을 거듭 보내지 않음)
+                if (ackedIds.size < events.size) break
+            }
+
+            if (ackedCount > 0) {
+                Log.i("SyncService", "Sent $ackedCount Kakao read events")
+            }
+        } catch (e: CancellationException) {
+            // 동기화 주기 재시작에 따른 취소는 오류가 아니므로 그대로 전달
+            throw e
+        } catch (e: Exception) {
+            // 연결 끊김, 예전 PC의 JSON이 아닌 응답 등 → 지우지 않고 다음 주기에 다시 보냄
+            Log.w("SyncService", "Kakao read event upload failed: ${e.message}")
         }
     }
 
