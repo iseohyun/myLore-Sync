@@ -16,6 +16,8 @@ import android.net.wifi.WifiManager
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
+import android.os.CancellationSignal
+import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
@@ -57,6 +59,19 @@ class LocationWifiCollector(private val context: Context) {
         // 외출 모드 능동 수집 주기 (지도 앱 비활성 & Wi-Fi 미연결 시: 2분 / 25m)
         private const val OUTING_MIN_TIME_MS = 2 * 60_000L
         private const val OUTING_MIN_DISTANCE_M = 25f
+
+        /**
+         * 한 시간마다 남기는 위치 (2026-11-22 사용자 요청: 최소한 한 시간에 한 번은 자기 위치를 기록).
+         * 집에 가만히 있으면 다른 앱이 위치를 요청하지 않아 패시브 위치가 오지 않고, 아래 4)의 스냅샷도 "마지막으로 알려진 위치"를
+         * 그 위치의 옛 시각으로 다시 읽을 뿐이라 PC에서 같은 기록으로 걸러집니다. 그래서 한 시간마다 새 위치를 직접 한 번 요청하고,
+         * 제한 시간 안에 못 받으면 가장 정확한 마지막 위치를 지금 시각으로 남깁니다.
+         */
+        private const val HEARTBEAT_INTERVAL_MS = 60 * 60_000L
+        /** 새 위치를 기다리는 시간 */
+        private const val HEARTBEAT_FIX_TIMEOUT_MS = 30_000L
+
+        @Volatile
+        private var lastHeartbeatMs: Long = 0L
 
         private val isPassiveListenerRegistered = AtomicBoolean(false)
         private val isWifiCallbackRegistered = AtomicBoolean(false)
@@ -166,6 +181,13 @@ class LocationWifiCollector(private val context: Context) {
 
             // 4) 캐시된 최근 스냅샷 주기적 보강 (최소 2분 간격)
             val now = System.currentTimeMillis()
+
+            // 5) 한 시간마다 새 위치를 요청해 남김 (앱이 켜진 뒤 첫 호출에도 한 번)
+            if (now - lastHeartbeatMs >= HEARTBEAT_INTERVAL_MS) {
+                lastHeartbeatMs = now
+                recordHourlyHeartbeat(appCtx)
+            }
+
             if (now - lastPassiveCollectMs >= 120_000L) {
                 lastPassiveCollectMs = now
                 try {
@@ -326,6 +348,87 @@ class LocationWifiCollector(private val context: Context) {
             } catch (_: Exception) {
             }
         }
+
+        /**
+         * 새 위치를 한 번 요청해(네트워크 위치 먼저 — 실내에서도 빨리 오고 배터리를 덜 씀) 남깁니다.
+         * [HEARTBEAT_FIX_TIMEOUT_MS] 안에 못 받으면 제공자들의 마지막 위치 중 가장 정확한 것을 지금 시각으로 남깁니다.
+         * 정확도가 100m보다 나쁘면 저장 단계([GpsBackgroundProcessor])에서 걸러집니다.
+         */
+        @SuppressLint("MissingPermission")
+        private fun recordHourlyHeartbeat(appCtx: Context) {
+            val lm = appCtx.getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return
+            val done = AtomicBoolean(false)
+            val handler = Handler(Looper.getMainLooper())
+            var singleListener: LocationListener? = null
+
+            fun finish(fresh: Location?) {
+                if (!done.compareAndSet(false, true)) return
+                singleListener?.let { runCatching { lm.removeUpdates(it) } }
+                val nowMs = System.currentTimeMillis()
+                val loc = fresh ?: bestLastKnownLocation(lm) ?: run {
+                    Log.i(TAG, "한 시간 위치: 새 위치도 마지막 위치도 없음")
+                    return
+                }
+                if (kotlin.math.abs(loc.latitude) < 0.0001 && kotlin.math.abs(loc.longitude) < 0.0001) return
+                val item = SyncLocationLogItem(
+                    eventType = "heartbeat",
+                    placeLabel = "",
+                    wifiSsid = getConnectedWifiSsid(appCtx),
+                    wifiBssid = "",
+                    latitude = loc.latitude,
+                    longitude = loc.longitude,
+                    accuracyM = loc.accuracy.toDouble(),
+                    batteryPct = getBatteryPct(appCtx),
+                    // 새 위치는 그 위치의 시각, 마지막 위치로 대신하면 지금 시각 ("여기 계속 있음")
+                    ts = if (fresh != null) (fresh.time.takeIf { it > 0L } ?: nowMs) else nowMs,
+                    note = if (fresh != null) "fresh_${fresh.provider ?: ""}" else "last_known"
+                )
+                Log.i(TAG, "한 시간 위치 남김 (${item.note}, 정확도 ${loc.accuracy.toInt()}m)")
+                GpsBackgroundProcessor.enqueueLocationSnapshot(AppDatabase.getInstance(appCtx), listOf(item))
+            }
+
+            if (!hasLocationPermission(appCtx)) return
+            val provider = listOf(LocationManager.NETWORK_PROVIDER, LocationManager.GPS_PROVIDER)
+                .firstOrNull { p -> runCatching { lm.isProviderEnabled(p) }.getOrDefault(false) }
+            if (provider == null) {
+                finish(null)
+                return
+            }
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    val cancel = CancellationSignal()
+                    lm.getCurrentLocation(provider, cancel, appCtx.mainExecutor) { loc -> finish(loc) }
+                    handler.postDelayed({
+                        cancel.cancel()
+                        finish(null)
+                    }, HEARTBEAT_FIX_TIMEOUT_MS)
+                } else {
+                    val listener = object : LocationListener {
+                        override fun onLocationChanged(location: Location) = finish(location)
+                        @Deprecated("Deprecated in Java")
+                        override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
+                        override fun onProviderEnabled(provider: String) {}
+                        override fun onProviderDisabled(provider: String) {}
+                    }
+                    singleListener = listener
+                    @Suppress("DEPRECATION")
+                    lm.requestSingleUpdate(provider, listener, Looper.getMainLooper())
+                    handler.postDelayed({ finish(null) }, HEARTBEAT_FIX_TIMEOUT_MS)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "한 시간 위치 요청 실패", e)
+                finish(null)
+            }
+        }
+
+        /** 제공자들의 마지막 위치 중 가장 정확한 것 (정확도를 모르면 맨 뒤) */
+        @SuppressLint("MissingPermission")
+        private fun bestLastKnownLocation(lm: LocationManager): Location? =
+            (lm.allProviders + listOf(LocationManager.PASSIVE_PROVIDER, LocationManager.NETWORK_PROVIDER, LocationManager.GPS_PROVIDER))
+                .distinct()
+                .mapNotNull { p -> runCatching { lm.getLastKnownLocation(p) }.getOrNull() }
+                .filter { kotlin.math.abs(it.latitude) >= 0.0001 || kotlin.math.abs(it.longitude) >= 0.0001 }
+                .minByOrNull { if (it.hasAccuracy()) it.accuracy else Float.MAX_VALUE }
 
         private fun recordImmediateSnapshot(appCtx: Context, reasonTag: String) {
             try {
