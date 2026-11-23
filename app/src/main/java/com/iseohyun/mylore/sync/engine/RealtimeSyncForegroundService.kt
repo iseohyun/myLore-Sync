@@ -351,6 +351,11 @@ class RealtimeSyncForegroundService : Service() {
         syncPendingKakaoTasks(ctx)
         syncPendingVoiceRecordings(ctx)
         syncPendingHealthFiles(ctx)
+        // 휴대폰 Download/ 바로 아래 파일 (카드 명세서 PDF 등) → PC로, 받았다고 하면 휴대폰에서 지움
+        if (canContinueSession(ctx.monitor)) {
+            val sent = DownloadFolderUploader.uploadAll(ctx.api, ctx.token) { canContinueSession(ctx.monitor) }
+            if (sent > 0) ctx.didTransmitData = true
+        }
         syncPendingPhotoMedia(ctx)
         syncContactsAndAppUsage(ctx)
 

@@ -142,6 +142,15 @@ interface MyLoreApiService {
         @Body body: RequestBody
     ): Response<SyncResponse>
 
+    /** 휴대폰 `Download/` 바로 아래 파일 하나 (본문 = 파일 바이트, PC `routes_downloads.rs`) */
+    @POST("/api/v1/sync/downloads")
+    suspend fun uploadDownloadFile(
+        @Header("X-MyLore-Token") token: String,
+        @Header("X-File-Name") fileName: String,
+        @Header("X-File-Modified-Ms") modifiedMs: String,
+        @Body body: RequestBody
+    ): Response<SyncResponse>
+
     @POST("/api/v1/sync/call-transcripts")
     suspend fun syncCallTranscripts(
         @Header("X-MyLore-Token") token: String,
