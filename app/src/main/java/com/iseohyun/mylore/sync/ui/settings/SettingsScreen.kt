@@ -359,6 +359,32 @@ fun SettingsScreen(
             }
         }
 
+        Spacer(modifier = Modifier.height(16.dp))
+        Text("🛠️ 무선 디버깅 (PC에서 휴대폰 파일 확인용)", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+        Spacer(modifier = Modifier.height(8.dp))
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                Text(
+                    if (WirelessDebugging.canTurnOnDirectly(context))
+                        "누르면 무선 디버깅을 바로 켜고 설정 화면을 엽니다."
+                    else
+                        "휴대폰이 앱에 직접 켜는 권한을 주지 않아, 누르면 무선 디버깅 설정 화면으로 갑니다. 그 화면에서 켜 주세요.",
+                    fontSize = 12.sp,
+                    color = Color.Gray
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Button(
+                    onClick = {
+                        val message = WirelessDebugging.turnOnOrOpen(context)
+                        Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("📡 무선 디버깅 켜기", fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+
         Spacer(modifier = Modifier.height(24.dp))
         }
     }

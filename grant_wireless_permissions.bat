@@ -8,6 +8,9 @@ set PACKAGE_NAME=com.iseohyun.mylore.sync
 echo Setting MANAGE_EXTERNAL_STORAGE permission...
 adb shell appops set %PACKAGE_NAME% MANAGE_EXTERNAL_STORAGE allow
 
+echo Setting WRITE_SECURE_SETTINGS (Wireless debugging button turns it on directly)...
+adb shell pm grant %PACKAGE_NAME% android.permission.WRITE_SECURE_SETTINGS
+
 echo Setting Notification Listener permission...
 adb shell cmd notification allow_listener %PACKAGE_NAME%/.collector.MyloreNotificationListener
 

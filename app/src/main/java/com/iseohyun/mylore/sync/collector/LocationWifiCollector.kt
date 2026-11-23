@@ -69,6 +69,8 @@ class LocationWifiCollector(private val context: Context) {
         private const val HEARTBEAT_INTERVAL_MS = 60 * 60_000L
         /** 새 위치를 기다리는 시간 */
         private const val HEARTBEAT_FIX_TIMEOUT_MS = 30_000L
+        /** 마지막 위치들의 시각이 같은 1분 칸이면 같은 때로 보고 더 정확한 것을 고름 */
+        private const val LAST_KNOWN_SAME_TIME_NANOS = 60_000_000_000L
 
         @Volatile
         private var lastHeartbeatMs: Long = 0L
@@ -421,14 +423,22 @@ class LocationWifiCollector(private val context: Context) {
             }
         }
 
-        /** 제공자들의 마지막 위치 중 가장 정확한 것 (정확도를 모르면 맨 뒤) */
+        /**
+         * 제공자들의 마지막 위치 중 가장 최근 것 (같은 때면 더 정확한 것).
+         * 지금 시각을 붙여 "여기 계속 있음"으로 남기므로 정확도보다 최근이 먼저입니다. 가장 정확한 것을 고르면
+         * 몇 시간 전 바깥의 GPS 위치(정확도 좋음)가 집의 네트워크 위치(정확도 100m)를 이겨, 집에 있는데
+         * 밤에 수영장에 다녀온 것처럼 남았습니다 (2026-11-22 21:26 · 23:28, 11-23 09:12 · 15:24 · 17:25).
+         */
         @SuppressLint("MissingPermission")
         private fun bestLastKnownLocation(lm: LocationManager): Location? =
             (lm.allProviders + listOf(LocationManager.PASSIVE_PROVIDER, LocationManager.NETWORK_PROVIDER, LocationManager.GPS_PROVIDER))
                 .distinct()
                 .mapNotNull { p -> runCatching { lm.getLastKnownLocation(p) }.getOrNull() }
                 .filter { kotlin.math.abs(it.latitude) >= 0.0001 || kotlin.math.abs(it.longitude) >= 0.0001 }
-                .minByOrNull { if (it.hasAccuracy()) it.accuracy else Float.MAX_VALUE }
+                .maxWithOrNull(
+                    compareBy<Location> { it.elapsedRealtimeNanos / LAST_KNOWN_SAME_TIME_NANOS }
+                        .thenByDescending { if (it.hasAccuracy()) it.accuracy else Float.MAX_VALUE }
+                )
 
         private fun recordImmediateSnapshot(appCtx: Context, reasonTag: String) {
             try {
