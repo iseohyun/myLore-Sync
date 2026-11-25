@@ -57,6 +57,7 @@ fun MobileVoiceCaptureDialog(
     var phraseIdx by remember { mutableStateOf(0) }
     var totalPhrases by remember { mutableStateOf(5) }
     var phraseTitle by remember { mutableStateOf("서버 문구 동기화 중...") }
+    // 서버 문구를 받기 전 기본값(못 받으면 이 글로 녹음해 PC에 보냄). PC가 이름 없이 만드는 1단계 문구와 같게 두고, 실명은 코드에 쓰지 않음
     var phraseText by remember { mutableStateOf("여보세요? 네, 안녕하세요. 말씀하세요.") }
     var sampleCount by remember { mutableStateOf(0) }
     var crossScore by remember { mutableStateOf(0.0) }
